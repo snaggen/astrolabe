@@ -1,0 +1,20 @@
+[package]
+name = "cosmic-web"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "EUPL-1.2"
+
+[dependencies]
+cosmic-config = { path = "../cosmic-epoch/libcosmic/cosmic-config" }
+cosmic-webview = { path = "../cosmic-webview", features = ["xdg-portal"] }
+libcosmic = { package = "libcosmic", path = "../cosmic-epoch/libcosmic", features = ["winit", "wgpu"] }
+
+# Servo types used directly: InputEvent, ContextMenu, ContextMenuAction, etc.
+# Must match the revision used by cosmic-webview to ensure a single compiled instance.
+servo = { git = "https://github.com/servo/servo", rev = "c2f705ca2ff", default-features = false, features = ["js_jit", "vello", "baked-in-resources"] }
+
+async-channel = "2"
+dpi = "0.1"
+tracing = "0.1"
+url = "2.5"
