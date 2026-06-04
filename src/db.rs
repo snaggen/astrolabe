@@ -128,6 +128,93 @@ pub async fn delete_history_entry(conn: Connection, id: i64) -> anyhow::Result<(
     Ok(())
 }
 
+// ── Awesomebar suggestions ────────────────────────────────────────────────────
+
+/// Source of an awesomebar suggestion.
+#[derive(Clone, Debug)]
+pub enum SuggestionKind {
+    Bookmark,
+    History,
+    /// Returned by the search engine's autocomplete API.
+    Search,
+}
+
+/// A single awesomebar suggestion shown while the user types in the URL bar.
+#[derive(Clone, Debug)]
+pub struct Suggestion {
+    pub url: String,
+    pub title: String,
+    pub kind: SuggestionKind,
+}
+
+/// Return up to `limit` suggestions matching `input`, bookmarks first.
+///
+/// Bookmarks are always ranked above history. History entries are ranked by a
+/// recency × frequency score. Duplicates (bookmark + history) are deduplicated.
+pub async fn query_suggestions(
+    conn: Connection,
+    input: String,
+    limit: usize,
+) -> anyhow::Result<Vec<Suggestion>> {
+    let like = format!("%{input}%");
+
+    // Bookmarks first.
+    let mut rows = conn
+        .query(
+            "SELECT url, title FROM bookmarks
+             WHERE url LIKE ?1 OR title LIKE ?1
+             ORDER BY title
+             LIMIT ?2",
+            (like.as_str(), limit as i64),
+        )
+        .await?;
+
+    let mut suggestions: Vec<Suggestion> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    while let Some(row) = rows.next().await? {
+        let url: String = row.get(0)?;
+        let title: String = row.get(1)?;
+        seen.insert(url.clone());
+        suggestions.push(Suggestion {
+            url,
+            title,
+            kind: SuggestionKind::Bookmark,
+        });
+    }
+
+    // History ranked by recency × frequency, deduped against bookmarks.
+    if suggestions.len() < limit {
+        let mut rows = conn
+            .query(
+                "SELECT url, title FROM history
+                 WHERE url LIKE ?1 OR title LIKE ?1
+                 ORDER BY CAST(visit_count AS REAL)
+                          / (1.0 + (unixepoch() - last_visited) / 86400.0) DESC
+                 LIMIT ?2",
+                (like.as_str(), limit as i64),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            if suggestions.len() >= limit {
+                break;
+            }
+            let url: String = row.get(0)?;
+            if seen.contains(&url) {
+                continue;
+            }
+            let title: String = row.get(1)?;
+            suggestions.push(Suggestion {
+                url,
+                title,
+                kind: SuggestionKind::History,
+            });
+        }
+    }
+
+    Ok(suggestions)
+}
+
 // ── Bookmarks ─────────────────────────────────────────────────────────────────
 
 /// A bookmark entry as stored in the database.

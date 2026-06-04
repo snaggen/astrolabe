@@ -38,6 +38,19 @@ pub enum SearchEngine {
 }
 
 impl SearchEngine {
+    /// Human-readable display name used in the awesomebar engine row.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::DuckDuckGo => "DuckDuckGo",
+            Self::Kagi => "Kagi",
+            Self::Brave => "Brave",
+            Self::Ecosia => "Ecosia",
+            Self::Startpage => "Startpage",
+            Self::Qwant => "Qwant",
+            Self::Custom(_) => "Custom",
+        }
+    }
+
     /// Build a search URL for the given query, percent-encoding it for the query string.
     pub fn search_url(&self, query: &str) -> String {
         let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();

@@ -9,7 +9,7 @@ use dpi::PhysicalSize;
 use libcosmic::app::context_drawer;
 use libcosmic::app::{Core, Task};
 use libcosmic::executor;
-use libcosmic::iced::{Event, Length, Subscription, window};
+use libcosmic::iced::{Event, Length, Subscription, keyboard, window};
 use libcosmic::prelude::*;
 use libcosmic::widget;
 use libcosmic::widget::menu::{self, action::MenuAction};
@@ -17,10 +17,11 @@ use libcosmic::widget::segmented_button;
 use turso::Connection;
 use url::Url;
 
-use crate::config::{BrowserConfig, StartupPage};
-use crate::db::{BookmarkEntry, HistoryEntry, HistorySort};
+use crate::config::{BrowserConfig, SearchEngine, StartupPage};
+use crate::db::{BookmarkEntry, HistoryEntry, HistorySort, Suggestion};
 use crate::pages;
 use crate::tabs::TabState;
+use crate::url_bar;
 use cosmic_config::CosmicConfigEntry as _;
 
 // ── Context menu ──────────────────────────────────────────────────────────────
@@ -147,6 +148,21 @@ pub enum Message {
     TabClosed(segmented_button::Entity),
     /// User requested a new tab.
     TabNew,
+    // ── Awesomebar ────────────────────────────────────────────────────────────
+    /// Suggestion list loaded from history + bookmarks for the current input.
+    SuggestionsReady(Vec<Suggestion>),
+    /// User pressed ArrowDown to move to the next suggestion.
+    SuggestionNext,
+    /// User pressed ArrowUp to move to the previous suggestion (or restore input).
+    SuggestionPrev,
+    /// User clicked a suggestion at the given index.
+    SuggestionActivated(usize),
+    /// Close the suggestion list (Escape, webview click, or explicit dismiss).
+    SuggestionsClose,
+    /// User clicked one of the quick-search engine buttons.
+    SearchWithEngine(SearchEngine),
+    /// Live autocomplete results arrived from the search engine's suggestion API.
+    EngineSuggestionsReady(Vec<Suggestion>),
     // ── Bookmarks ─────────────────────────────────────────────────────────────
     /// Open the bookmarks context drawer and load entries.
     BookmarkOpen,
@@ -223,6 +239,13 @@ pub struct App {
     config: BrowserConfig,
     /// Which page is currently shown in the context drawer.
     context_page: ContextPage,
+    // ── Awesomebar ────────────────────────────────────────────────────────────
+    /// Current suggestion list shown below the URL bar, empty when hidden.
+    suggestions: Vec<Suggestion>,
+    /// Index of the highlighted suggestion (None = user's own typed text).
+    suggestion_index: Option<usize>,
+    /// The text the user actually typed, saved before arrow-key navigation.
+    suggestion_query: String,
     // ── Database & history ────────────────────────────────────────────────────
     /// Live database connection; None until the async open task completes.
     db: Option<Connection>,
@@ -242,13 +265,14 @@ pub struct App {
 }
 
 impl App {
-    /// Parse the active tab's URL bar text and navigate.
+    /// Parse the active tab's URL bar text, navigate, and unfocus the URL bar.
     ///
     /// Input that looks like a URL (has `://` or a dot-only domain) is treated
     /// as an address; everything else is forwarded to the configured search engine.
-    fn try_navigate(&mut self) {
+    /// Returns a Task that moves keyboard focus away from the URL bar to the page.
+    fn try_navigate(&mut self) -> Task<Message> {
         let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
-            return;
+            return Task::none();
         };
         let raw = tab.url_bar_text.trim().to_owned();
         let url = if raw.contains("://") {
@@ -263,7 +287,10 @@ impl App {
             Url::parse(&search).expect("search engine URL must be valid")
         });
         tab.url_bar_text = url.to_string();
+        tab.url_bar_focused = false;
         tab.servo.navigate(url);
+        // Move keyboard focus away from the URL bar to the page.
+        libcosmic::iced::widget::operation::focus_next()
     }
 
     /// Dismiss the active context menu without selecting an item.
@@ -427,6 +454,9 @@ impl libcosmic::Application for App {
             core,
             config,
             context_page: ContextPage::default(),
+            suggestions: Vec::new(),
+            suggestion_index: None,
+            suggestion_query: String::new(),
             tabs,
             servo_rx,
             scale,
@@ -463,6 +493,18 @@ impl libcosmic::Application for App {
 
         let window_sub = event::listen_with(|event, _status, _id| match event {
             Event::Window(window::Event::Rescaled(factor)) => Some(Message::ScaleChanged(factor)),
+            Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => match key {
+                keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                    Some(Message::SuggestionsClose)
+                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+                    Some(Message::SuggestionNext)
+                }
+                keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+                    Some(Message::SuggestionPrev)
+                }
+                _ => None,
+            },
             _ => None,
         });
 
@@ -575,6 +617,9 @@ impl libcosmic::Application for App {
             }
 
             Message::Input(event) => {
+                // Do NOT clear suggestion_query here: mouse-move events over the
+                // webview underneath the popup would close the popup on hover.
+                // The popup closes on navigation, Escape, or suggestion click.
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
                     tab.servo.send_input(event);
                 }
@@ -583,23 +628,87 @@ impl libcosmic::Application for App {
             Message::UrlBarFocused => {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
                     tab.url_bar_focused = true;
+                    let text = tab.url_bar_text.trim().to_owned();
+                    if !text.is_empty() {
+                        self.suggestion_query = text.clone();
+                        if let Some(conn) = self.db.clone() {
+                            let engine = self.config.search_engine.clone();
+                            let text2 = text.clone();
+                            let db_task = Task::perform(
+                                async move { crate::db::query_suggestions(conn, text, 6).await },
+                                |result| match result {
+                                    Ok(s) => libcosmic::action::app(Message::SuggestionsReady(s)),
+                                    Err(e) => {
+                                        tracing::warn!("Suggestions query failed: {e}");
+                                        libcosmic::action::app(Message::SuggestionsReady(vec![]))
+                                    }
+                                },
+                            );
+                            let http_task = Task::perform(
+                                async move { crate::url_bar::fetch_suggestions(engine, text2).await },
+                                |s| libcosmic::action::app(Message::EngineSuggestionsReady(s)),
+                            );
+                            return Task::batch(vec![db_task, http_task]);
+                        }
+                    }
                 }
             }
 
             Message::UrlBarUnfocused => {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
                     tab.url_bar_focused = false;
+                    // Do NOT clear suggestions here: the unfocus fires on mouse-press
+                    // before a suggestion click is processed, so clearing now would
+                    // swallow the click. Suggestions are cleared on navigate or Escape.
                 }
             }
 
             Message::UrlBarChanged(text) => {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
-                    tab.url_bar_text = text;
+                    tab.url_bar_text = text.clone();
+                }
+                self.suggestion_index = None;
+                self.suggestion_query = text.clone();
+                if text.trim().is_empty() {
+                    self.suggestions.clear();
+                    return Task::none();
+                }
+                if let Some(conn) = self.db.clone() {
+                    let engine = self.config.search_engine.clone();
+                    let text2 = text.clone();
+                    let db_task = Task::perform(
+                        async move { crate::db::query_suggestions(conn, text, 6).await },
+                        |result| match result {
+                            Ok(s) => libcosmic::action::app(Message::SuggestionsReady(s)),
+                            Err(e) => {
+                                tracing::warn!("Suggestions query failed: {e}");
+                                libcosmic::action::app(Message::SuggestionsReady(vec![]))
+                            }
+                        },
+                    );
+                    let http_task = Task::perform(
+                        async move { crate::url_bar::fetch_suggestions(engine, text2).await },
+                        |s| libcosmic::action::app(Message::EngineSuggestionsReady(s)),
+                    );
+                    return Task::batch(vec![db_task, http_task]);
                 }
             }
 
             Message::Navigate => {
-                self.try_navigate();
+                // If a suggestion is selected, put its text in the URL bar first
+                // so try_navigate() can handle both full URLs and search terms.
+                if let Some(i) = self.suggestion_index
+                    && let Some(s) = self.suggestions.get(i)
+                {
+                    let text = s.url.clone();
+                    if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                        tab.url_bar_text = text;
+                    }
+                }
+                self.suggestions.clear();
+                self.suggestion_index = None;
+                self.suggestion_query.clear();
+                return self.try_navigate();
             }
 
             Message::GoBack => {
@@ -654,6 +763,124 @@ impl libcosmic::Application for App {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
                     tab.servo.update_dialog(msg);
                 }
+            }
+
+            // ── Awesomebar ────────────────────────────────────────────────────
+            Message::SuggestionsReady(suggestions) => {
+                self.suggestions = suggestions;
+                self.suggestion_index = None;
+            }
+
+            Message::EngineSuggestionsReady(engine_results) => {
+                let seen: HashSet<String> =
+                    self.suggestions.iter().map(|s| s.url.clone()).collect();
+                for s in engine_results {
+                    if !seen.contains(&s.url) {
+                        self.suggestions.push(s);
+                    }
+                }
+            }
+
+            Message::SuggestionNext => {
+                let focused = self
+                    .tabs
+                    .active_data::<TabState>()
+                    .map(|t| t.url_bar_focused)
+                    .unwrap_or(false);
+                if !focused || self.suggestions.is_empty() {
+                    return Task::none();
+                }
+                let new_idx = match self.suggestion_index {
+                    None => {
+                        if let Some(tab) = self.tabs.active_data::<TabState>() {
+                            self.suggestion_query = tab.url_bar_text.clone();
+                        }
+                        Some(0)
+                    }
+                    Some(i) if i + 1 < self.suggestions.len() => Some(i + 1),
+                    Some(i) => Some(i),
+                };
+                self.suggestion_index = new_idx;
+                if let Some(i) = new_idx
+                    && let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                {
+                    tab.url_bar_text = self.suggestions[i].url.clone();
+                }
+            }
+
+            Message::SuggestionPrev => {
+                let focused = self
+                    .tabs
+                    .active_data::<TabState>()
+                    .map(|t| t.url_bar_focused)
+                    .unwrap_or(false);
+                if !focused || self.suggestions.is_empty() {
+                    return Task::none();
+                }
+                match self.suggestion_index {
+                    None | Some(0) => {
+                        self.suggestion_index = None;
+                        let query = self.suggestion_query.clone();
+                        if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                            tab.url_bar_text = query;
+                        }
+                    }
+                    Some(i) => {
+                        self.suggestion_index = Some(i - 1);
+                        let url = self.suggestions[i - 1].url.clone();
+                        if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                            tab.url_bar_text = url;
+                        }
+                    }
+                }
+            }
+
+            Message::SuggestionActivated(i) => {
+                // Copy the suggestion text into the URL bar, then let
+                // try_navigate handle both full URLs and plain search terms.
+                if let Some(s) = self.suggestions.get(i) {
+                    let text = s.url.clone();
+                    if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                        tab.url_bar_text = text;
+                    }
+                }
+                self.suggestions.clear();
+                self.suggestion_index = None;
+                self.suggestion_query.clear();
+                return self.try_navigate();
+            }
+
+            Message::SuggestionsClose => {
+                if self.suggestion_index.is_some() {
+                    let query = self.suggestion_query.clone();
+                    if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                        tab.url_bar_text = query;
+                    }
+                }
+                self.suggestions.clear();
+                self.suggestion_index = None;
+                self.suggestion_query.clear();
+            }
+
+            Message::SearchWithEngine(engine) => {
+                let query = if !self.suggestion_query.is_empty() {
+                    self.suggestion_query.clone()
+                } else {
+                    self.tabs
+                        .active_data::<TabState>()
+                        .map(|t| t.url_bar_text.clone())
+                        .unwrap_or_default()
+                };
+                let url_str = engine.search_url(&query);
+                if let Ok(url) = Url::parse(&url_str)
+                    && let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                {
+                    tab.url_bar_text = url_str;
+                    tab.servo.navigate(url);
+                }
+                self.suggestions.clear();
+                self.suggestion_index = None;
+                self.suggestion_query.clear();
             }
 
             Message::WebViewResized(w, h) => {
@@ -1021,12 +1248,34 @@ impl libcosmic::Application for App {
             build_servo_menu(&self.context_items)
         };
 
+        let webview_area =
+            widget::container(widget::context_menu(webview, Some(menu_items))).height(Length::Fill);
+
+        // Always keep the popover in the widget tree so the text input's widget
+        // ID stays stable and focus is not reset when suggestions appear.
+        // A stable ID is required; the default is widget::Id::unique() which
+        // changes every render and would reset focus state.
+        let nav_area: Element<'_, Message> = {
+            let p = widget::popover(nav_row)
+                .id(widget::Id::new("url_bar_suggestions"))
+                .position(widget::popover::Position::Bottom);
+            // Show the popup whenever the user has typed something — the
+            // engine-row is always useful even when there are no local matches.
+            if !self.suggestion_query.is_empty() {
+                p.popup(url_bar::suggestion_list(
+                    &self.suggestions,
+                    self.suggestion_index,
+                    &self.config.search_engine,
+                ))
+                .into()
+            } else {
+                p.into()
+            }
+        };
+
         widget::column::with_capacity(2)
-            .push(nav_row)
-            .push(
-                widget::container(widget::context_menu(webview, Some(menu_items)))
-                    .height(Length::Fill),
-            )
+            .push(nav_area)
+            .push(webview_area)
             .into()
     }
 }
