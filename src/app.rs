@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use cosmic_webview::{DialogMsg, ServoState, WebViewFrame, WebViewWidget};
+use cosmic_webview::{DialogMsg, WebViewWidget};
 use dpi::PhysicalSize;
 use libcosmic::app::{Core, Task};
 use libcosmic::executor;
@@ -9,11 +9,14 @@ use libcosmic::iced::{Event, Length, Subscription, window};
 use libcosmic::prelude::*;
 use libcosmic::widget;
 use libcosmic::widget::menu::{self, action::MenuAction};
+use libcosmic::widget::segmented_button;
 use servo::{
     ContextMenu, ContextMenuAction, ContextMenuItem, EditingActionEvent, EmbedderControl,
     InputEvent,
 };
 use url::Url;
+
+use crate::tabs::TabState;
 
 // ── Context menu ──────────────────────────────────────────────────────────────
 
@@ -94,9 +97,10 @@ fn build_servo_menu(items: &[ContextMenuItem]) -> Vec<menu::Tree<Message>> {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    /// Servo needs to spin its event loop.
+    /// Servo needs to spin its event loop. All tabs share one engine so one
+    /// wake signal covers all pending WebView events.
     ServoWake,
-    /// A mouse or keyboard event to forward to Servo.
+    /// A mouse or keyboard event to forward to the active tab's Servo.
     Input(InputEvent),
     /// URL bar gained focus — suspend keyboard forwarding to Servo.
     UrlBarFocused,
@@ -114,7 +118,7 @@ pub enum Message {
     StopLoading,
     CopySelection,
     Paste,
-    /// User selected an item from Servo's context menu.
+    /// User selected an item from the active tab's Servo context menu.
     ContextMenuSelected(ContextMenuAction),
     /// Forwarded from ServoState's built-in dialog handler.
     Dialog(DialogMsg),
@@ -122,21 +126,26 @@ pub enum Message {
     WebViewResized(u32, u32),
     /// HiDPI scale factor changed.
     ScaleChanged(f32),
+    /// User activated (clicked) a tab.
+    TabActivated(segmented_button::Entity),
+    /// User closed a tab.
+    TabClosed(segmented_button::Entity),
+    /// User requested a new tab.
+    TabNew,
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
 
 pub struct App {
     core: Core,
-    servo: ServoState,
-    /// Persistent GPU texture updated in-place each frame.
-    frame: WebViewFrame,
-    /// Text currently shown in the URL bar input field.
-    url_bar_text: String,
-    /// True while the URL bar holds keyboard focus.
-    url_bar_focused: bool,
+    /// Tab model; each entity has associated [`TabState`] (including its URL bar).
+    tabs: segmented_button::SingleSelectModel,
+    /// Shared waker receiver: all tabs fire the same channel since they share one engine.
+    servo_rx: async_channel::Receiver<()>,
     /// HiDPI scale for converting logical cursor coordinates to physical pixels.
     scale: f32,
+    /// Physical size of the webview area, updated on each resize.
+    current_size: PhysicalSize<u32>,
     /// Kept alive while a context menu is open; dropping sends an auto-dismiss to Servo.
     context_menu: Option<ContextMenu>,
     /// Items from the most recent Servo context menu; cleared after selection or dismiss.
@@ -144,31 +153,66 @@ pub struct App {
 }
 
 impl App {
-    /// Parse the URL bar text and navigate if valid; prepend https:// if no scheme present.
+    /// Parse the active tab's URL bar text and navigate.
     fn try_navigate(&mut self) {
-        let raw = self.url_bar_text.trim().to_owned();
+        let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
+            return;
+        };
+        let raw = tab.url_bar_text.trim().to_owned();
         let with_scheme = if raw.contains("://") {
-            raw.clone()
+            raw
         } else {
             format!("https://{raw}")
         };
         if let Ok(url) = Url::parse(&with_scheme) {
-            self.url_bar_text = url.to_string();
-            self.servo.navigate(url);
+            tab.url_bar_text = url.to_string();
+            tab.servo.navigate(url);
         }
     }
 
     /// Dismiss the active context menu without selecting an item.
-    /// Dropping the ContextMenu handle sends an automatic dismiss to Servo.
     fn dismiss_context_menu(&mut self) {
         self.context_menu = None;
         self.context_items.clear();
+    }
+
+    /// Create a new tab loading `url` and register it in the tab model.
+    /// The caller is responsible for activating the returned entity.
+    fn add_tab(&mut self, url: Url) -> segmented_button::Entity {
+        let (tab, _rx) = TabState::new(url, self.current_size, self.scale);
+        self.tabs.insert().closable().text("New Tab").data(tab).id()
+    }
+
+    /// Close `id`, activating a neighbor first. Does nothing if it is the last tab.
+    fn close_tab(&mut self, id: segmented_button::Entity) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        if self.tabs.is_active(id) {
+            if let Some(pos) = self.tabs.position(id) {
+                let next = if pos == 0 { pos + 1 } else { pos - 1 };
+                self.tabs.activate_position(next);
+            }
+            self.dismiss_context_menu();
+        }
+        // Dropping the entity also drops the associated TabState.
+        self.tabs.remove(id);
+    }
+
+    /// Update the window title to match the currently active tab.
+    fn sync_active_title(&mut self) {
+        let title = self
+            .tabs
+            .active_data::<TabState>()
+            .and_then(|tab| tab.servo.title())
+            .unwrap_or_default();
+        self.set_header_title(title);
     }
 }
 
 // ── Servo subscription helper ─────────────────────────────────────────────────
 
-/// Newtype so async_channel::Receiver<()> satisfies Hash for Subscription::run_with.
+/// Newtype so `async_channel::Receiver<()>` satisfies `Hash` for `Subscription::run_with`.
 #[derive(Clone)]
 struct ServoRx(async_channel::Receiver<()>);
 
@@ -196,23 +240,31 @@ impl libcosmic::Application for App {
     }
 
     fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
-        let initial_url = Url::parse("about:blank").expect("about:blank is always valid");
-        // Read initial scale from the same env var iced uses so Servo's CSS
-        // viewport is correct from the first frame.
         let scale = std::env::var("COSMIC_SCALE")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(1.0);
-        // Window dimensions must match the size passed to Settings in main.rs.
-        let size = PhysicalSize::new(1280u32, 800);
-        let (servo, _rx) = ServoState::new(initial_url.clone(), size, scale);
+
+        let initial_size = PhysicalSize::new(1280u32, 800);
+        let initial_url = Url::parse("about:blank").expect("about:blank is always valid");
+
+        let (first_tab, servo_rx) = TabState::new(initial_url, initial_size, scale);
+
+        let mut tabs = segmented_button::SingleSelectModel::default();
+        let first_id = tabs
+            .insert()
+            .closable()
+            .text("New Tab")
+            .data(first_tab)
+            .id();
+        tabs.activate(first_id);
+
         let app = App {
             core,
-            servo,
-            frame: WebViewFrame::new(),
-            url_bar_text: initial_url.to_string(),
-            url_bar_focused: false,
+            tabs,
+            servo_rx,
             scale,
+            current_size: initial_size,
             context_menu: None,
             context_items: Vec::new(),
         };
@@ -223,7 +275,8 @@ impl libcosmic::Application for App {
         use libcosmic::iced::event;
         use libcosmic::iced::futures::StreamExt as _;
 
-        let servo_sub = Subscription::run_with(ServoRx(self.servo.waker_rx()), |s| {
+        // All tabs share one Servo engine and therefore one waker channel.
+        let servo_sub = Subscription::run_with(ServoRx(self.servo_rx.clone()), |s| {
             s.0.clone().map(|_| Message::ServoWake)
         });
 
@@ -238,55 +291,99 @@ impl libcosmic::Application for App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ServoWake => {
-                self.servo.spin();
+                // Spin the shared engine once — covers all pending WebView events.
+                if let Some(tab) = self.tabs.active_data::<TabState>() {
+                    tab.servo.spin();
+                }
 
-                // Servo delivers context menus one frame after right-click via take_dialog.
-                match self.servo.take_dialog() {
-                    Some(EmbedderControl::ContextMenu(menu)) => {
-                        self.context_items = menu.items().to_vec();
-                        self.context_menu = Some(menu);
-                    }
-                    Some(control) => {
-                        if let Some(task) = self.servo.handle_dialog_control(control) {
-                            return task.map(|msg| libcosmic::action::app(Message::Dialog(msg)));
+                // Process state changes for every tab.
+                let ids: Vec<_> = self.tabs.iter().collect();
+                for id in ids {
+                    let is_active = self.tabs.is_active(id);
+
+                    // Collect volatile state while holding the mutable borrow.
+                    let (title, dialog, crash) = {
+                        let Some(tab) = self.tabs.data_mut::<TabState>(id) else {
+                            continue;
+                        };
+
+                        // Context menus only matter for the active (visible) tab.
+                        let dialog = if is_active {
+                            tab.servo.take_dialog()
+                        } else {
+                            let _ = tab.servo.take_dialog();
+                            None
+                        };
+
+                        // Keep URL bar in sync unless the user is typing.
+                        if !tab.url_bar_focused
+                            && let Some(url) = tab.servo.current_url()
+                        {
+                            tab.url_bar_text = url.to_string();
+                        }
+
+                        let title = tab.servo.title();
+
+                        if is_active && let Some(img) = tab.servo.current_frame().as_ref() {
+                            let (w, h) = img.dimensions();
+                            tab.frame.update(w, h, img.as_raw());
+                        }
+
+                        let crash = tab.servo.take_crash();
+                        (title, dialog, crash)
+                    };
+
+                    if let Some(title) = title {
+                        self.tabs.text_set(id, title.clone());
+                        if is_active {
+                            self.set_header_title(title);
                         }
                     }
-                    None => {}
-                }
 
-                // Keep the URL bar in sync with the page URL unless the user is typing.
-                if !self.url_bar_focused
-                    && let Some(url) = self.servo.current_url()
-                {
-                    self.url_bar_text = url.to_string();
-                }
+                    if let Some((reason, _)) = crash {
+                        tracing::error!("WebView crashed: {reason}");
+                    }
 
-                self.set_header_title(self.servo.title().unwrap_or_default());
-
-                if let Some(img) = self.servo.current_frame().as_ref() {
-                    let (w, h) = img.dimensions();
-                    self.frame.update(w, h, img.as_raw());
-                }
-
-                if let Some((reason, _bt)) = self.servo.take_crash() {
-                    tracing::error!("WebView crashed: {reason}");
+                    match dialog {
+                        Some(EmbedderControl::ContextMenu(menu)) => {
+                            self.context_items = menu.items().to_vec();
+                            self.context_menu = Some(menu);
+                        }
+                        Some(control) => {
+                            if let Some(tab) = self.tabs.data_mut::<TabState>(id)
+                                && let Some(task) = tab.servo.handle_dialog_control(control)
+                            {
+                                return task
+                                    .map(|msg| libcosmic::action::app(Message::Dialog(msg)));
+                            }
+                        }
+                        None => {}
+                    }
                 }
             }
 
             Message::Input(event) => {
-                self.servo.send_input(event);
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.servo.send_input(event);
+                }
             }
 
             Message::UrlBarFocused => {
-                self.url_bar_focused = true;
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.url_bar_focused = true;
+                }
             }
 
             Message::UrlBarUnfocused => {
-                self.url_bar_focused = false;
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.url_bar_focused = false;
+                }
             }
 
             Message::UrlBarChanged(text) => {
-                self.url_bar_text = text;
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.url_bar_text = text;
+                }
             }
 
             Message::Navigate => {
@@ -295,34 +392,43 @@ impl libcosmic::Application for App {
 
             Message::GoBack => {
                 self.dismiss_context_menu();
-                self.servo.go_back();
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.servo.go_back();
+                }
             }
 
             Message::GoForward => {
                 self.dismiss_context_menu();
-                self.servo.go_forward();
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.servo.go_forward();
+                }
             }
 
             Message::Reload => {
                 self.dismiss_context_menu();
-                self.servo.reload();
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.servo.reload();
+                }
             }
 
             Message::StopLoading => {
                 // The Servo embedding API does not yet expose a stop method.
-                // The button still provides visual feedback that a load is in progress.
             }
 
             Message::CopySelection => {
                 self.dismiss_context_menu();
-                self.servo
-                    .send_input(InputEvent::EditingAction(EditingActionEvent::Copy));
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.servo
+                        .send_input(InputEvent::EditingAction(EditingActionEvent::Copy));
+                }
             }
 
             Message::Paste => {
                 self.dismiss_context_menu();
-                self.servo
-                    .send_input(InputEvent::EditingAction(EditingActionEvent::Paste));
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.servo
+                        .send_input(InputEvent::EditingAction(EditingActionEvent::Paste));
+                }
             }
 
             Message::ContextMenuSelected(action) => {
@@ -333,16 +439,48 @@ impl libcosmic::Application for App {
             }
 
             Message::Dialog(msg) => {
-                self.servo.update_dialog(msg);
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.servo.update_dialog(msg);
+                }
             }
 
             Message::WebViewResized(w, h) => {
-                self.servo.resize(PhysicalSize::new(w, h));
+                self.current_size = PhysicalSize::new(w, h);
+                // All tabs share the same display area.
+                let ids: Vec<_> = self.tabs.iter().collect();
+                for id in ids {
+                    if let Some(tab) = self.tabs.data_mut::<TabState>(id) {
+                        tab.servo.resize(PhysicalSize::new(w, h));
+                    }
+                }
             }
 
             Message::ScaleChanged(factor) => {
                 self.scale = factor;
-                self.servo.set_scale_factor(factor);
+                let ids: Vec<_> = self.tabs.iter().collect();
+                for id in ids {
+                    if let Some(tab) = self.tabs.data_mut::<TabState>(id) {
+                        tab.servo.set_scale_factor(factor);
+                    }
+                }
+            }
+
+            Message::TabActivated(id) => {
+                self.tabs.activate(id);
+                self.dismiss_context_menu();
+                self.sync_active_title();
+            }
+
+            Message::TabClosed(id) => {
+                self.close_tab(id);
+                self.sync_active_title();
+            }
+
+            Message::TabNew => {
+                let url = Url::parse("about:blank").expect("about:blank is always valid");
+                let id = self.add_tab(url);
+                self.tabs.activate(id);
+                self.dismiss_context_menu();
             }
         }
 
@@ -352,26 +490,62 @@ impl libcosmic::Application for App {
     fn header_start(&self) -> Vec<Element<'_, Message>> {
         use servo::LoadStatus;
 
+        let (can_back, can_forward, is_loading) = self
+            .tabs
+            .active_data::<TabState>()
+            .map(|tab| {
+                (
+                    tab.servo.can_go_back(),
+                    tab.servo.can_go_forward(),
+                    tab.servo.load_status() != LoadStatus::Complete,
+                )
+            })
+            .unwrap_or_default();
+
         let back = widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
-            .on_press_maybe(self.servo.can_go_back().then_some(Message::GoBack));
+            .on_press_maybe(can_back.then_some(Message::GoBack));
 
         let forward = widget::button::icon(widget::icon::from_name("go-next-symbolic"))
-            .on_press_maybe(self.servo.can_go_forward().then_some(Message::GoForward));
+            .on_press_maybe(can_forward.then_some(Message::GoForward));
 
-        // Show a stop button while a page is loading, reload once complete.
-        let reload_or_stop = if self.servo.load_status() == LoadStatus::Complete {
-            widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
-                .on_press(Message::Reload)
-        } else {
+        let reload_or_stop = if is_loading {
             widget::button::icon(widget::icon::from_name("process-stop-symbolic"))
                 .on_press(Message::StopLoading)
+        } else {
+            widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+                .on_press(Message::Reload)
         };
 
         vec![back.into(), forward.into(), reload_or_stop.into()]
     }
 
     fn header_center(&self) -> Vec<Element<'_, Message>> {
-        let url_bar = widget::text_input("https://example.com", &self.url_bar_text)
+        let tab_bar = widget::tab_bar::horizontal(&self.tabs)
+            .show_close_icon_on_hover(true)
+            .on_activate(Message::TabActivated)
+            .on_close(Message::TabClosed)
+            .width(Length::Fill);
+
+        let new_tab_btn = widget::button::icon(widget::icon::from_name("tab-new-symbolic"))
+            .on_press(Message::TabNew);
+
+        vec![tab_bar.into(), new_tab_btn.into()]
+    }
+
+    fn dialog(&self) -> Option<Element<'_, Message>> {
+        self.tabs
+            .active_data::<TabState>()?
+            .servo
+            .dialog_view()
+            .map(|e| e.map(Message::Dialog))
+    }
+
+    fn view(&self) -> Element<'_, Message> {
+        let Some(tab) = self.tabs.active_data::<TabState>() else {
+            return widget::text("No active tab").into();
+        };
+
+        let url_bar = widget::text_input("https://example.com", &tab.url_bar_text)
             .on_focus(Message::UrlBarFocused)
             .on_unfocus(Message::UrlBarUnfocused)
             .on_input(Message::UrlBarChanged)
@@ -379,28 +553,24 @@ impl libcosmic::Application for App {
             .select_on_focus(true)
             .width(Length::Fill);
 
-        vec![url_bar.into()]
-    }
-
-    fn dialog(&self) -> Option<Element<'_, Message>> {
-        self.servo.dialog_view().map(|e| e.map(Message::Dialog))
-    }
-
-    fn view(&self) -> Element<'_, Message> {
-        let webview = WebViewWidget::new(&self.frame)
+        let webview = WebViewWidget::new(&tab.frame)
             .scale(self.scale)
             .on_input(Message::Input)
             .on_resize(Message::WebViewResized)
-            .keyboard_enabled(!self.url_bar_focused);
+            .keyboard_enabled(!tab.url_bar_focused);
 
-        // Use Servo's context-sensitive items when available (arrives ~1 frame after
-        // right-click). Falls back to a static browser menu until they arrive.
         let menu_items = if self.context_items.is_empty() {
-            build_default_menu(self.servo.can_go_back(), self.servo.can_go_forward())
+            build_default_menu(tab.servo.can_go_back(), tab.servo.can_go_forward())
         } else {
             build_servo_menu(&self.context_items)
         };
 
-        widget::context_menu(webview, Some(menu_items)).into()
+        widget::column::with_capacity(2)
+            .push(url_bar)
+            .push(
+                widget::container(widget::context_menu(webview, Some(menu_items)))
+                    .height(Length::Fill),
+            )
+            .into()
     }
 }
