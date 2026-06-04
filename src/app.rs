@@ -487,38 +487,6 @@ impl libcosmic::Application for App {
         Task::none()
     }
 
-    fn header_start(&self) -> Vec<Element<'_, Message>> {
-        use servo::LoadStatus;
-
-        let (can_back, can_forward, is_loading) = self
-            .tabs
-            .active_data::<TabState>()
-            .map(|tab| {
-                (
-                    tab.servo.can_go_back(),
-                    tab.servo.can_go_forward(),
-                    tab.servo.load_status() != LoadStatus::Complete,
-                )
-            })
-            .unwrap_or_default();
-
-        let back = widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
-            .on_press_maybe(can_back.then_some(Message::GoBack));
-
-        let forward = widget::button::icon(widget::icon::from_name("go-next-symbolic"))
-            .on_press_maybe(can_forward.then_some(Message::GoForward));
-
-        let reload_or_stop = if is_loading {
-            widget::button::icon(widget::icon::from_name("process-stop-symbolic"))
-                .on_press(Message::StopLoading)
-        } else {
-            widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
-                .on_press(Message::Reload)
-        };
-
-        vec![back.into(), forward.into(), reload_or_stop.into()]
-    }
-
     fn header_center(&self) -> Vec<Element<'_, Message>> {
         let tab_bar = widget::tab_bar::horizontal(&self.tabs)
             .show_close_icon_on_hover(true)
@@ -541,8 +509,30 @@ impl libcosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        use servo::LoadStatus;
+
         let Some(tab) = self.tabs.active_data::<TabState>() else {
             return widget::text("No active tab").into();
+        };
+
+        let (can_back, can_forward, is_loading) = (
+            tab.servo.can_go_back(),
+            tab.servo.can_go_forward(),
+            tab.servo.load_status() != LoadStatus::Complete,
+        );
+
+        let back = widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
+            .on_press_maybe(can_back.then_some(Message::GoBack));
+
+        let forward = widget::button::icon(widget::icon::from_name("go-next-symbolic"))
+            .on_press_maybe(can_forward.then_some(Message::GoForward));
+
+        let reload_or_stop = if is_loading {
+            widget::button::icon(widget::icon::from_name("process-stop-symbolic"))
+                .on_press(Message::StopLoading)
+        } else {
+            widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+                .on_press(Message::Reload)
         };
 
         let url_bar = widget::text_input("https://example.com", &tab.url_bar_text)
@@ -553,6 +543,12 @@ impl libcosmic::Application for App {
             .select_on_focus(true)
             .width(Length::Fill);
 
+        let nav_row = widget::row::with_capacity(4)
+            .push(back)
+            .push(forward)
+            .push(reload_or_stop)
+            .push(url_bar);
+
         let webview = WebViewWidget::new(&tab.frame)
             .scale(self.scale)
             .on_input(Message::Input)
@@ -560,13 +556,13 @@ impl libcosmic::Application for App {
             .keyboard_enabled(!tab.url_bar_focused);
 
         let menu_items = if self.context_items.is_empty() {
-            build_default_menu(tab.servo.can_go_back(), tab.servo.can_go_forward())
+            build_default_menu(can_back, can_forward)
         } else {
             build_servo_menu(&self.context_items)
         };
 
         widget::column::with_capacity(2)
-            .push(url_bar)
+            .push(nav_row)
             .push(
                 widget::container(widget::context_menu(webview, Some(menu_items)))
                     .height(Length::Fill),
