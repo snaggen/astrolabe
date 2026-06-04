@@ -12,6 +12,7 @@ libcosmic = { package = "libcosmic", path = "../cosmic-epoch/libcosmic", feature
 
 async-channel = "2"
 dpi = "0.1"
+serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 url = "2.5"
 # default-features disabled to avoid mimalloc conflicting with servo's global allocator

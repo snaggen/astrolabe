@@ -17,9 +17,11 @@ use libcosmic::widget::segmented_button;
 use turso::Connection;
 use url::Url;
 
+use crate::config::{BrowserConfig, StartupPage};
 use crate::db::{HistoryEntry, HistorySort};
 use crate::pages;
 use crate::tabs::TabState;
+use cosmic_config::CosmicConfigEntry as _;
 
 // ── Context menu ──────────────────────────────────────────────────────────────
 
@@ -135,6 +137,9 @@ pub enum Message {
     TabClosed(segmented_button::Entity),
     /// User requested a new tab.
     TabNew,
+    // ── Config ────────────────────────────────────────────────────────────────
+    /// Browser configuration was updated externally (e.g. via cosmic-settings).
+    ConfigChanged(BrowserConfig),
     // ── Database ──────────────────────────────────────────────────────────────
     /// Database opened successfully and is ready to use.
     DatabaseReady(Connection),
@@ -177,6 +182,8 @@ pub struct App {
     context_menu: Option<ContextMenu>,
     /// Items from the most recent Servo context menu; cleared after selection or dismiss.
     context_items: Vec<ContextMenuItem>,
+    /// Persistent browser settings loaded from cosmic_config.
+    config: BrowserConfig,
     // ── Database & history ────────────────────────────────────────────────────
     /// Live database connection; None until the async open task completes.
     db: Option<Connection>,
@@ -190,20 +197,27 @@ pub struct App {
 
 impl App {
     /// Parse the active tab's URL bar text and navigate.
+    ///
+    /// Input that looks like a URL (has `://` or a dot-only domain) is treated
+    /// as an address; everything else is forwarded to the configured search engine.
     fn try_navigate(&mut self) {
         let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
             return;
         };
         let raw = tab.url_bar_text.trim().to_owned();
-        let with_scheme = if raw.contains("://") {
-            raw
+        let url = if raw.contains("://") {
+            Url::parse(&raw).ok()
+        } else if raw.contains('.') && !raw.contains(' ') {
+            Url::parse(&format!("https://{raw}")).ok()
         } else {
-            format!("https://{raw}")
+            None
         };
-        if let Ok(url) = Url::parse(&with_scheme) {
-            tab.url_bar_text = url.to_string();
-            tab.servo.navigate(url);
-        }
+        let url = url.unwrap_or_else(|| {
+            let search = self.config.search_engine.search_url(&raw);
+            Url::parse(&search).expect("search engine URL must be valid")
+        });
+        tab.url_bar_text = url.to_string();
+        tab.servo.navigate(url);
     }
 
     /// Dismiss the active context menu without selecting an item.
@@ -233,6 +247,19 @@ impl App {
         }
         // Dropping the entity also drops the associated TabState.
         self.tabs.remove(id);
+    }
+
+    /// Return the URL to open in new tabs based on the current config.
+    fn startup_url(&self) -> Url {
+        match &self.config.startup_page {
+            StartupPage::Url(u) => Url::parse(u).unwrap_or_else(|_| {
+                Url::parse("about:blank").expect("about:blank is always valid")
+            }),
+            // SearchEngine and NewTab both show about:blank until Fas 6/7
+            StartupPage::SearchEngine | StartupPage::NewTab => {
+                Url::parse("about:blank").expect("about:blank is always valid")
+            }
+        }
     }
 
     /// Issue a DB query and send the results back as `HistoryLoaded`.
@@ -284,7 +311,7 @@ impl libcosmic::Application for App {
     type Flags = ();
     type Message = Message;
 
-    const APP_ID: &'static str = "org.cosmic.WebBrowser";
+    const APP_ID: &'static str = "io.github.snaggen.CosmicWeb";
 
     fn core(&self) -> &Core {
         &self.core
@@ -300,8 +327,26 @@ impl libcosmic::Application for App {
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(1.0);
 
+        let config = cosmic_config::Config::new(Self::APP_ID, BrowserConfig::VERSION)
+            .map(|c| {
+                BrowserConfig::get_entry(&c).unwrap_or_else(|(errs, c)| {
+                    for e in errs {
+                        tracing::warn!("Config load error: {e}");
+                    }
+                    c
+                })
+            })
+            .unwrap_or_default();
+
         let initial_size = PhysicalSize::new(1280u32, 800);
-        let initial_url = Url::parse("about:blank").expect("about:blank is always valid");
+        let initial_url = match &config.startup_page {
+            StartupPage::Url(u) => Url::parse(u).unwrap_or_else(|_| {
+                Url::parse("about:blank").expect("about:blank is always valid")
+            }),
+            StartupPage::SearchEngine | StartupPage::NewTab => {
+                Url::parse("about:blank").expect("about:blank is always valid")
+            }
+        };
 
         let (first_tab, servo_rx) = TabState::new(initial_url, initial_size, scale);
 
@@ -316,6 +361,7 @@ impl libcosmic::Application for App {
 
         let app = App {
             core,
+            config,
             tabs,
             servo_rx,
             scale,
@@ -352,7 +398,16 @@ impl libcosmic::Application for App {
             _ => None,
         });
 
-        Subscription::batch([servo_sub, window_sub])
+        let config_sub = self
+            .watch_config::<BrowserConfig>(Self::APP_ID)
+            .map(|update| {
+                if !update.errors.is_empty() {
+                    tracing::warn!("Config load errors: {:?}", update.errors);
+                }
+                Message::ConfigChanged(update.config)
+            });
+
+        Subscription::batch([servo_sub, window_sub, config_sub])
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -566,10 +621,15 @@ impl libcosmic::Application for App {
             }
 
             Message::TabNew => {
-                let url = Url::parse("about:blank").expect("about:blank is always valid");
+                let url = self.startup_url();
                 let id = self.add_tab(url);
                 self.tabs.activate(id);
                 self.dismiss_context_menu();
+            }
+
+            // ── Config ────────────────────────────────────────────────────────
+            Message::ConfigChanged(config) => {
+                self.config = config;
             }
 
             // ── Database ──────────────────────────────────────────────────────
