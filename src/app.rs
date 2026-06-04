@@ -109,6 +109,9 @@ pub enum Message {
     GoBack,
     GoForward,
     Reload,
+    /// Stop the current page load. Note: the Servo embedding API does not yet
+    /// expose a real stop method, so this is currently a no-op.
+    StopLoading,
     CopySelection,
     Paste,
     /// User selected an item from Servo's context menu.
@@ -305,6 +308,11 @@ impl libcosmic::Application for App {
                 self.servo.reload();
             }
 
+            Message::StopLoading => {
+                // The Servo embedding API does not yet expose a stop method.
+                // The button still provides visual feedback that a load is in progress.
+            }
+
             Message::CopySelection => {
                 self.dismiss_context_menu();
                 self.servo
@@ -342,16 +350,24 @@ impl libcosmic::Application for App {
     }
 
     fn header_start(&self) -> Vec<Element<'_, Message>> {
+        use servo::LoadStatus;
+
         let back = widget::button::icon(widget::icon::from_name("go-previous-symbolic"))
             .on_press_maybe(self.servo.can_go_back().then_some(Message::GoBack));
 
         let forward = widget::button::icon(widget::icon::from_name("go-next-symbolic"))
             .on_press_maybe(self.servo.can_go_forward().then_some(Message::GoForward));
 
-        let reload = widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
-            .on_press(Message::Reload);
+        // Show a stop button while a page is loading, reload once complete.
+        let reload_or_stop = if self.servo.load_status() == LoadStatus::Complete {
+            widget::button::icon(widget::icon::from_name("view-refresh-symbolic"))
+                .on_press(Message::Reload)
+        } else {
+            widget::button::icon(widget::icon::from_name("process-stop-symbolic"))
+                .on_press(Message::StopLoading)
+        };
 
-        vec![back.into(), forward.into(), reload.into()]
+        vec![back.into(), forward.into(), reload_or_stop.into()]
     }
 
     fn header_center(&self) -> Vec<Element<'_, Message>> {
