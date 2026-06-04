@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use turso::{Builder, Connection};
@@ -125,4 +126,69 @@ pub async fn delete_history_entry(conn: Connection, id: i64) -> anyhow::Result<(
     conn.execute("DELETE FROM history WHERE id = ?1", (id,))
         .await?;
     Ok(())
+}
+
+// ── Bookmarks ─────────────────────────────────────────────────────────────────
+
+/// A bookmark entry as stored in the database.
+#[derive(Clone, Debug)]
+pub struct BookmarkEntry {
+    pub id: i64,
+    pub url: String,
+    pub title: String,
+}
+
+/// Add a bookmark, ignoring duplicates.
+pub async fn add_bookmark(conn: Connection, url: String, title: String) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO bookmarks (url, title) VALUES (?1, ?2)",
+        (url.as_str(), title.as_str()),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove a bookmark by URL.
+pub async fn remove_bookmark(conn: Connection, url: String) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM bookmarks WHERE url = ?1", (url.as_str(),))
+        .await?;
+    Ok(())
+}
+
+/// Delete a single bookmark by its database id.
+pub async fn delete_bookmark_entry(conn: Connection, id: i64) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM bookmarks WHERE id = ?1", (id,))
+        .await?;
+    Ok(())
+}
+
+/// Query bookmarks filtered by URL or title substring, ordered by title.
+pub async fn query_bookmarks(
+    conn: Connection,
+    filter: String,
+) -> anyhow::Result<Vec<BookmarkEntry>> {
+    let like = format!("%{filter}%");
+    let mut rows = conn
+        .query(
+            "SELECT id, url, title FROM bookmarks
+             WHERE url LIKE ?1 OR title LIKE ?1
+             ORDER BY title",
+            (like.as_str(),),
+        )
+        .await?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().await? {
+        entries.push(BookmarkEntry {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            title: row.get(2)?,
+        });
+    }
+    Ok(entries)
+}
+
+/// Load the set of all bookmarked URLs (used for the star-icon check).
+pub async fn load_bookmarked_urls(conn: Connection) -> anyhow::Result<HashSet<String>> {
+    let entries = query_bookmarks(conn, String::new()).await?;
+    Ok(entries.into_iter().map(|e| e.url).collect())
 }

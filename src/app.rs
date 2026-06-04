@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use cosmic_webview::{
@@ -18,7 +18,7 @@ use turso::Connection;
 use url::Url;
 
 use crate::config::{BrowserConfig, StartupPage};
-use crate::db::{HistoryEntry, HistorySort};
+use crate::db::{BookmarkEntry, HistoryEntry, HistorySort};
 use crate::pages;
 use crate::tabs::TabState;
 use cosmic_config::CosmicConfigEntry as _;
@@ -98,6 +98,16 @@ fn build_servo_menu(items: &[ContextMenuItem]) -> Vec<menu::Tree<Message>> {
     menu::items(&HashMap::new(), menu_items)
 }
 
+// ── Context page ─────────────────────────────────────────────────────────────
+
+/// Which page is currently shown in the context drawer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ContextPage {
+    #[default]
+    History,
+    Bookmarks,
+}
+
 // ── Application messages ──────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -137,6 +147,33 @@ pub enum Message {
     TabClosed(segmented_button::Entity),
     /// User requested a new tab.
     TabNew,
+    // ── Bookmarks ─────────────────────────────────────────────────────────────
+    /// Open the bookmarks context drawer and load entries.
+    BookmarkOpen,
+    /// Bookmarks context drawer closed via its X button.
+    BookmarkClose,
+    /// Bookmark entries loaded from DB.
+    BookmarkLoaded(Vec<BookmarkEntry>),
+    /// User typed in the bookmarks filter field.
+    BookmarkFilterChanged(String),
+    /// User clicked a bookmark entry to navigate.
+    BookmarkNavigate(String),
+    /// Toggle bookmark status for the active tab's URL.
+    BookmarkToggle,
+    /// Bookmark was added or removed; carry the URL and new state.
+    BookmarkToggled {
+        url: String,
+        is_bookmarked: bool,
+    },
+    /// User clicked the delete button on a bookmark entry.
+    BookmarkDeleteEntry(i64),
+    /// Bookmark deletion confirmed; carry the id and URL for local cleanup.
+    BookmarkEntryDeleted {
+        id: i64,
+        url: String,
+    },
+    /// Initial set of bookmarked URLs loaded when the database opened.
+    BookmarksInitialized(HashSet<String>),
     // ── Config ────────────────────────────────────────────────────────────────
     /// Browser configuration was updated externally (e.g. via cosmic-settings).
     ConfigChanged(BrowserConfig),
@@ -184,6 +221,8 @@ pub struct App {
     context_items: Vec<ContextMenuItem>,
     /// Persistent browser settings loaded from cosmic_config.
     config: BrowserConfig,
+    /// Which page is currently shown in the context drawer.
+    context_page: ContextPage,
     // ── Database & history ────────────────────────────────────────────────────
     /// Live database connection; None until the async open task completes.
     db: Option<Connection>,
@@ -193,6 +232,13 @@ pub struct App {
     history_filter: String,
     /// Active sort order for the history drawer.
     history_sort: HistorySort,
+    // ── Bookmarks ─────────────────────────────────────────────────────────────
+    /// Bookmark entries currently shown in the context drawer.
+    bookmarks: Vec<BookmarkEntry>,
+    /// Active filter text for the bookmarks drawer.
+    bookmark_filter: String,
+    /// Set of bookmarked URLs for fast star-icon lookup.
+    bookmarked_urls: HashSet<String>,
 }
 
 impl App {
@@ -260,6 +306,24 @@ impl App {
                 Url::parse("about:blank").expect("about:blank is always valid")
             }
         }
+    }
+
+    /// Issue a DB query and send the results back as `BookmarkLoaded`.
+    fn reload_bookmarks(&self) -> Task<Message> {
+        let Some(conn) = self.db.clone() else {
+            return Task::none();
+        };
+        let filter = self.bookmark_filter.clone();
+        Task::perform(
+            async move { crate::db::query_bookmarks(conn, filter).await },
+            |result| match result {
+                Ok(entries) => libcosmic::action::app(Message::BookmarkLoaded(entries)),
+                Err(e) => {
+                    tracing::warn!("Bookmark query failed: {e}");
+                    libcosmic::action::app(Message::BookmarkLoaded(vec![]))
+                }
+            },
+        )
     }
 
     /// Issue a DB query and send the results back as `HistoryLoaded`.
@@ -362,6 +426,7 @@ impl libcosmic::Application for App {
         let app = App {
             core,
             config,
+            context_page: ContextPage::default(),
             tabs,
             servo_rx,
             scale,
@@ -372,6 +437,9 @@ impl libcosmic::Application for App {
             history_entries: Vec::new(),
             history_filter: String::new(),
             history_sort: HistorySort::default(),
+            bookmarks: Vec::new(),
+            bookmark_filter: String::new(),
+            bookmarked_urls: HashSet::new(),
         };
 
         let db_task = Task::perform(
@@ -634,17 +702,156 @@ impl libcosmic::Application for App {
 
             // ── Database ──────────────────────────────────────────────────────
             Message::DatabaseReady(conn) => {
-                self.db = Some(conn);
+                self.db = Some(conn.clone());
+                return Task::perform(
+                    async move { crate::db::load_bookmarked_urls(conn).await },
+                    |result| match result {
+                        Ok(urls) => libcosmic::action::app(Message::BookmarksInitialized(urls)),
+                        Err(e) => {
+                            tracing::warn!("Failed to load bookmarked URLs: {e}");
+                            libcosmic::action::app(Message::BookmarksInitialized(HashSet::new()))
+                        }
+                    },
+                );
             }
 
             Message::DatabaseFailed(reason) => {
                 tracing::error!("Database failed to open: {reason}");
             }
 
+            // ── Bookmarks ─────────────────────────────────────────────────────
+            Message::BookmarkOpen => {
+                if self.core().window.show_context && self.context_page == ContextPage::Bookmarks {
+                    self.core_mut().set_show_context(false);
+                } else {
+                    self.context_page = ContextPage::Bookmarks;
+                    self.core_mut().set_show_context(true);
+                    return self.reload_bookmarks();
+                }
+            }
+
+            Message::BookmarkClose => {
+                self.core_mut().set_show_context(false);
+            }
+
+            Message::BookmarkLoaded(entries) => {
+                self.bookmarks = entries;
+            }
+
+            Message::BookmarkFilterChanged(filter) => {
+                self.bookmark_filter = filter;
+                return self.reload_bookmarks();
+            }
+
+            Message::BookmarkNavigate(url) => {
+                self.core_mut().set_show_context(false);
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Ok(parsed) = Url::parse(&url)
+                {
+                    tab.url_bar_text = url;
+                    tab.servo.navigate(parsed);
+                }
+            }
+
+            Message::BookmarkToggle => {
+                if let Some(tab) = self.tabs.active_data::<TabState>()
+                    && let Some(url) = tab.servo.current_url()
+                    && let Some(conn) = self.db.clone()
+                {
+                    let url_str = url.to_string();
+                    let title = tab.servo.title().unwrap_or_default();
+                    if self.bookmarked_urls.contains(&url_str) {
+                        return Task::perform(
+                            async move {
+                                crate::db::remove_bookmark(conn, url_str.clone())
+                                    .await
+                                    .map(|_| url_str)
+                            },
+                            |result| match result {
+                                Ok(url) => libcosmic::action::app(Message::BookmarkToggled {
+                                    url,
+                                    is_bookmarked: false,
+                                }),
+                                Err(e) => {
+                                    tracing::warn!("Remove bookmark failed: {e}");
+                                    libcosmic::action::app(Message::VisitLogged)
+                                }
+                            },
+                        );
+                    } else {
+                        return Task::perform(
+                            async move {
+                                crate::db::add_bookmark(conn, url_str.clone(), title)
+                                    .await
+                                    .map(|_| url_str)
+                            },
+                            |result| match result {
+                                Ok(url) => libcosmic::action::app(Message::BookmarkToggled {
+                                    url,
+                                    is_bookmarked: true,
+                                }),
+                                Err(e) => {
+                                    tracing::warn!("Add bookmark failed: {e}");
+                                    libcosmic::action::app(Message::VisitLogged)
+                                }
+                            },
+                        );
+                    }
+                }
+            }
+
+            Message::BookmarkToggled { url, is_bookmarked } => {
+                if is_bookmarked {
+                    self.bookmarked_urls.insert(url);
+                } else {
+                    self.bookmarked_urls.remove(&url);
+                }
+                if self.core().window.show_context && self.context_page == ContextPage::Bookmarks {
+                    return self.reload_bookmarks();
+                }
+            }
+
+            Message::BookmarkDeleteEntry(id) => {
+                let url = self
+                    .bookmarks
+                    .iter()
+                    .find(|e| e.id == id)
+                    .map(|e| e.url.clone())
+                    .unwrap_or_default();
+                if let Some(conn) = self.db.clone() {
+                    return Task::perform(
+                        async move { crate::db::delete_bookmark_entry(conn, id).await },
+                        move |result| {
+                            if let Err(e) = &result {
+                                tracing::warn!("Delete bookmark failed: {e}");
+                            }
+                            libcosmic::action::app(Message::BookmarkEntryDeleted {
+                                id,
+                                url: url.clone(),
+                            })
+                        },
+                    );
+                }
+            }
+
+            Message::BookmarkEntryDeleted { id, url } => {
+                self.bookmarks.retain(|e| e.id != id);
+                self.bookmarked_urls.remove(&url);
+            }
+
+            Message::BookmarksInitialized(urls) => {
+                self.bookmarked_urls = urls;
+            }
+
             // ── History ───────────────────────────────────────────────────────
             Message::HistoryOpen => {
-                self.core_mut().set_show_context(true);
-                return self.reload_history();
+                if self.core().window.show_context && self.context_page == ContextPage::History {
+                    self.core_mut().set_show_context(false);
+                } else {
+                    self.context_page = ContextPage::History;
+                    self.core_mut().set_show_context(true);
+                    return self.reload_history();
+                }
             }
 
             Message::HistoryLoaded(entries) => {
@@ -698,8 +905,8 @@ impl libcosmic::Application for App {
         if !self.core().window.show_context {
             return None;
         }
-        Some(
-            context_drawer::context_drawer(
+        Some(match self.context_page {
+            ContextPage::History => context_drawer::context_drawer(
                 pages::history::view(
                     &self.history_entries,
                     &self.history_filter,
@@ -708,14 +915,22 @@ impl libcosmic::Application for App {
                 Message::HistoryClose,
             )
             .title("History"),
-        )
+            ContextPage::Bookmarks => context_drawer::context_drawer(
+                pages::bookmarks::view(&self.bookmarks, &self.bookmark_filter),
+                Message::BookmarkClose,
+            )
+            .title("Bookmarks"),
+        })
     }
 
     fn header_end(&self) -> Vec<Element<'_, Message>> {
+        let bookmarks_btn =
+            widget::button::icon(widget::icon::from_name("user-bookmarks-symbolic"))
+                .on_press(Message::BookmarkOpen);
         let history_btn =
             widget::button::icon(widget::icon::from_name("document-open-recent-symbolic"))
                 .on_press(Message::HistoryOpen);
-        vec![history_btn.into()]
+        vec![bookmarks_btn.into(), history_btn.into()]
     }
 
     fn header_center(&self) -> Vec<Element<'_, Message>> {
@@ -774,11 +989,25 @@ impl libcosmic::Application for App {
             .select_on_focus(true)
             .width(Length::Fill);
 
-        let nav_row = widget::row::with_capacity(4)
+        let current_url = tab
+            .servo
+            .current_url()
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        let star_icon = if self.bookmarked_urls.contains(&current_url) {
+            "starred-symbolic"
+        } else {
+            "non-starred-symbolic"
+        };
+        let bookmark_btn = widget::button::icon(widget::icon::from_name(star_icon))
+            .on_press(Message::BookmarkToggle);
+
+        let nav_row = widget::row::with_capacity(5)
             .push(back)
             .push(forward)
             .push(reload_or_stop)
-            .push(url_bar);
+            .push(url_bar)
+            .push(bookmark_btn);
 
         let webview = WebViewWidget::new(&tab.frame)
             .scale(self.scale)
