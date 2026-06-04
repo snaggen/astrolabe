@@ -3,7 +3,7 @@ use libcosmic::prelude::*;
 use libcosmic::widget;
 
 use crate::app::Message;
-use crate::config::SearchEngine;
+use crate::config::{BUILTIN_ENGINES, SearchEngine};
 use crate::db::{Suggestion, SuggestionKind};
 
 /// Fetch autocomplete suggestions from the engine's suggestion API.
@@ -55,14 +55,7 @@ fn parse_opensearch(json: &str) -> Vec<Suggestion> {
 const MAX_SUGGESTIONS: usize = 6;
 
 // All built-in engines shown as quick-search buttons.
-const ENGINES: &[SearchEngine] = &[
-    SearchEngine::DuckDuckGo,
-    SearchEngine::Kagi,
-    SearchEngine::Brave,
-    SearchEngine::Ecosia,
-    SearchEngine::Startpage,
-    SearchEngine::Qwant,
-];
+const ENGINES: &[SearchEngine] = BUILTIN_ENGINES;
 
 /// Popup shown below the URL bar while the user is typing.
 ///
@@ -96,14 +89,21 @@ fn suggestion_row<'a>(index: usize, s: &'a Suggestion, selected: bool) -> Elemen
         SuggestionKind::Bookmark => "user-bookmarks-symbolic",
         SuggestionKind::History => "document-open-recent-symbolic",
         SuggestionKind::Search => "system-search-symbolic",
+        SuggestionKind::SavedQuery => "document-open-recent-symbolic",
     };
 
     let title: &str = if s.title.is_empty() { &s.url } else { &s.title };
 
-    let info = widget::column::with_capacity(2)
-        .push(widget::text(title).width(Length::Fill))
-        .push(widget::text(&s.url).size(12).width(Length::Fill))
-        .width(Length::Fill);
+    // SavedQuery shows just the query text on one line; others show title + URL below.
+    let info: Element<'_, Message> = if matches!(s.kind, SuggestionKind::SavedQuery) {
+        widget::text(title).width(Length::Fill).into()
+    } else {
+        widget::column::with_capacity(2)
+            .push(widget::text(title).width(Length::Fill))
+            .push(widget::text(&s.url).size(12).width(Length::Fill))
+            .width(Length::Fill)
+            .into()
+    };
 
     let row = widget::row::with_capacity(2)
         .push(widget::icon(

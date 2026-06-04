@@ -17,8 +17,10 @@ use libcosmic::widget::segmented_button;
 use turso::Connection;
 use url::Url;
 
-use crate::config::{BrowserConfig, SearchEngine, StartupPage};
-use crate::db::{BookmarkEntry, HistoryEntry, HistorySort, Suggestion};
+use crate::config::{
+    BUILTIN_ENGINES, BrowserConfig, SearchEngine, StartupPage, extract_search_query,
+};
+use crate::db::{BookmarkEntry, HistoryEntry, HistorySort, Suggestion, SuggestionKind};
 use crate::pages;
 use crate::tabs::TabState;
 use crate::url_bar;
@@ -275,22 +277,38 @@ impl App {
             return Task::none();
         };
         let raw = tab.url_bar_text.trim().to_owned();
-        let url = if raw.contains("://") {
+        let explicit_url = if raw.contains("://") {
             Url::parse(&raw).ok()
         } else if raw.contains('.') && !raw.contains(' ') {
             Url::parse(&format!("https://{raw}")).ok()
         } else {
             None
         };
-        let url = url.unwrap_or_else(|| {
+        // Track whether this is a search so we can log it.
+        let is_search = explicit_url.is_none();
+        let url = explicit_url.unwrap_or_else(|| {
             let search = self.config.search_engine.search_url(&raw);
             Url::parse(&search).expect("search engine URL must be valid")
         });
         tab.url_bar_text = url.to_string();
         tab.url_bar_focused = false;
         tab.servo.navigate(url);
-        // Move keyboard focus away from the URL bar to the page.
-        libcosmic::iced::widget::operation::focus_next()
+
+        let focus_task = libcosmic::iced::widget::operation::focus_next();
+
+        if is_search && let Some(conn) = self.db.clone() {
+            let log_task = Task::perform(
+                async move {
+                    if let Err(e) = crate::db::log_search_query(conn, raw).await {
+                        tracing::warn!("Search query log failed: {e}");
+                    }
+                },
+                |_| libcosmic::action::app(Message::VisitLogged),
+            );
+            return Task::batch(vec![focus_task, log_task]);
+        }
+
+        focus_task
     }
 
     /// Dismiss the active context menu without selecting an item.
@@ -766,7 +784,34 @@ impl libcosmic::Application for App {
             }
 
             // ── Awesomebar ────────────────────────────────────────────────────
-            Message::SuggestionsReady(suggestions) => {
+            Message::SuggestionsReady(mut suggestions) => {
+                // Collect query texts already shown as SavedQuery entries.
+                let saved_queries: HashSet<String> = suggestions
+                    .iter()
+                    .filter(|s| s.kind == SuggestionKind::SavedQuery)
+                    .map(|s| s.url.clone())
+                    .collect();
+
+                // Drop History entries whose URL is a known search engine results
+                // page for a query already covered by a SavedQuery, to avoid
+                // showing both "kalle tjo" and the raw DDG/Qwant URL for the same search.
+                // Check all built-in engines plus the current engine (covers Custom).
+                if !saved_queries.is_empty() {
+                    let mut engines: Vec<SearchEngine> = BUILTIN_ENGINES.to_vec();
+                    if matches!(self.config.search_engine, SearchEngine::Custom(_)) {
+                        engines.push(self.config.search_engine.clone());
+                    }
+                    suggestions.retain(|s| {
+                        if s.kind != SuggestionKind::History {
+                            return true;
+                        }
+                        match extract_search_query(&s.url, &engines) {
+                            Some(q) => !saved_queries.contains(&q),
+                            None => true,
+                        }
+                    });
+                }
+
                 self.suggestions = suggestions;
                 self.suggestion_index = None;
             }
@@ -881,6 +926,16 @@ impl libcosmic::Application for App {
                 self.suggestions.clear();
                 self.suggestion_index = None;
                 self.suggestion_query.clear();
+                if let Some(conn) = self.db.clone() {
+                    return Task::perform(
+                        async move {
+                            if let Err(e) = crate::db::log_search_query(conn, query).await {
+                                tracing::warn!("Search query log failed: {e}");
+                            }
+                        },
+                        |_| libcosmic::action::app(Message::VisitLogged),
+                    );
+                }
             }
 
             Message::WebViewResized(w, h) => {

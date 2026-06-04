@@ -60,6 +60,11 @@ async fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             id    INTEGER PRIMARY KEY AUTOINCREMENT,
             url   TEXT NOT NULL UNIQUE,
             title TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS search_history (
+            query         TEXT    NOT NULL PRIMARY KEY,
+            last_searched INTEGER NOT NULL,
+            search_count  INTEGER NOT NULL DEFAULT 1
         );",
     )
     .await?;
@@ -80,6 +85,22 @@ pub async fn log_visit(conn: Connection, url: String, title: String) -> anyhow::
              visit_count  = history.visit_count + 1,
              last_visited = excluded.last_visited",
         (url.as_str(), title.as_str()),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Record a search query, upserting into search_history.
+///
+/// Called whenever the user submits a search (not a URL navigation).
+pub async fn log_search_query(conn: Connection, query: String) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO search_history (query, last_searched, search_count)
+         VALUES (?1, unixepoch(), 1)
+         ON CONFLICT(query) DO UPDATE SET
+             last_searched = excluded.last_searched,
+             search_count  = search_history.search_count + 1",
+        [query.as_str()],
     )
     .await?;
     Ok(())
@@ -131,12 +152,15 @@ pub async fn delete_history_entry(conn: Connection, id: i64) -> anyhow::Result<(
 // ── Awesomebar suggestions ────────────────────────────────────────────────────
 
 /// Source of an awesomebar suggestion.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SuggestionKind {
     Bookmark,
     History,
     /// Returned by the search engine's autocomplete API.
     Search,
+    /// A previously typed search query retrieved from local search history.
+    /// The `url` field on the parent `Suggestion` holds the raw query text, not a URL.
+    SavedQuery,
 }
 
 /// A single awesomebar suggestion shown while the user types in the URL bar.
@@ -181,6 +205,31 @@ pub async fn query_suggestions(
             title,
             kind: SuggestionKind::Bookmark,
         });
+    }
+
+    // Saved search queries ranked by recency × frequency.
+    if suggestions.len() < limit {
+        let mut rows = conn
+            .query(
+                "SELECT query FROM search_history
+                 WHERE query LIKE ?1
+                 ORDER BY CAST(search_count AS REAL)
+                          / (1.0 + (unixepoch() - last_searched) / 86400.0) DESC
+                 LIMIT ?2",
+                (like.as_str(), limit as i64),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            if suggestions.len() >= limit {
+                break;
+            }
+            let query: String = row.get(0)?;
+            suggestions.push(Suggestion {
+                url: query.clone(),
+                title: query,
+                kind: SuggestionKind::SavedQuery,
+            });
+        }
     }
 
     // History ranked by recency × frequency, deduped against bookmarks.

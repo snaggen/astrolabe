@@ -65,6 +65,37 @@ impl SearchEngine {
         }
     }
 
+    /// Returns `(hostname, query_param_name)` needed to recognise and parse search
+    /// result URLs produced by this engine.
+    ///
+    /// For `Custom`, both values are derived from the URL template: the host comes
+    /// from the parsed template URL, and the query parameter is whichever one
+    /// contains the `{query}` placeholder.  Returns `None` if the template is
+    /// malformed or carries no `{query}` parameter.
+    pub fn search_host_and_param(&self) -> Option<(String, String)> {
+        match self {
+            Self::DuckDuckGo => Some(("duckduckgo.com".into(), "q".into())),
+            Self::Kagi => Some(("kagi.com".into(), "q".into())),
+            Self::Brave => Some(("search.brave.com".into(), "q".into())),
+            Self::Ecosia => Some(("www.ecosia.org".into(), "q".into())),
+            Self::Startpage => Some(("www.startpage.com".into(), "q".into())),
+            Self::Qwant => Some(("www.qwant.com".into(), "q".into())),
+            Self::Custom(template) => {
+                // Replace the placeholder with a sentinel value so we can identify
+                // which query parameter it ends up in after URL parsing.
+                const SENTINEL: &str = "QSENTINEL42";
+                let dummy = template.replace("{query}", SENTINEL);
+                let parsed = url::Url::parse(&dummy).ok()?;
+                let host = parsed.host_str()?.to_owned();
+                let param = parsed
+                    .query_pairs()
+                    .find(|(_, v)| v.contains(SENTINEL))
+                    .map(|(k, _)| k.into_owned())?;
+                Some((host, param))
+            }
+        }
+    }
+
     /// Return an autocomplete suggestion URL for the given partial query, or
     /// `None` for engines that have no public suggestion API.
     /// Used by the Awesomebar (Fas 6).
@@ -87,6 +118,36 @@ impl SearchEngine {
             Self::Startpage | Self::Custom(_) => None,
         }
     }
+}
+
+/// All built-in (non-custom) search engines, in display order.
+pub const BUILTIN_ENGINES: &[SearchEngine] = &[
+    SearchEngine::DuckDuckGo,
+    SearchEngine::Kagi,
+    SearchEngine::Brave,
+    SearchEngine::Ecosia,
+    SearchEngine::Startpage,
+    SearchEngine::Qwant,
+];
+
+/// If `url` is a search results page from any engine in `engines`, return the decoded query.
+///
+/// The hostname and query parameter name are derived from each engine's own
+/// [`SearchEngine::search_host_and_param`] — no separate hardcoded lists.
+pub fn extract_search_query(url: &str, engines: &[SearchEngine]) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    for engine in engines {
+        if let Some((engine_host, param)) = engine.search_host_and_param()
+            && host == engine_host
+        {
+            return parsed
+                .query_pairs()
+                .find(|(k, _)| k.as_ref() == param.as_str())
+                .map(|(_, v)| v.into_owned());
+        }
+    }
+    None
 }
 
 /// Persistent browser configuration, stored via `cosmic_config`.
