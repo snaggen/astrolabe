@@ -15,6 +15,9 @@ pub struct TabState {
     pub url_bar_text: String,
     /// True while this tab's URL bar has keyboard focus.
     pub url_bar_focused: bool,
+    /// The URL that was last written to the history database for this tab.
+    /// Used to avoid logging the same URL twice in a row.
+    pub logged_url: Option<String>,
 }
 
 impl TabState {
@@ -28,6 +31,7 @@ impl TabState {
                 frame: WebViewFrame::new(),
                 url_bar_text,
                 url_bar_focused: false,
+                logged_url: None,
             },
             rx,
         )

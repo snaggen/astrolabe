@@ -14,3 +14,7 @@ async-channel = "2"
 dpi = "0.1"
 tracing = "0.1"
 url = "2.5"
+# default-features disabled to avoid mimalloc conflicting with servo's global allocator
+turso = { version = "0.6.1", default-features = false }
+dirs = "6.0.0"
+anyhow = "1.0.102"

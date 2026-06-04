@@ -6,6 +6,7 @@ use cosmic_webview::{
     EmbedderControl, InputEvent, WebViewWidget,
 };
 use dpi::PhysicalSize;
+use libcosmic::app::context_drawer;
 use libcosmic::app::{Core, Task};
 use libcosmic::executor;
 use libcosmic::iced::{Event, Length, Subscription, window};
@@ -13,8 +14,11 @@ use libcosmic::prelude::*;
 use libcosmic::widget;
 use libcosmic::widget::menu::{self, action::MenuAction};
 use libcosmic::widget::segmented_button;
+use turso::Connection;
 use url::Url;
 
+use crate::db::{HistoryEntry, HistorySort};
+use crate::pages;
 use crate::tabs::TabState;
 
 // ── Context menu ──────────────────────────────────────────────────────────────
@@ -131,6 +135,30 @@ pub enum Message {
     TabClosed(segmented_button::Entity),
     /// User requested a new tab.
     TabNew,
+    // ── Database ──────────────────────────────────────────────────────────────
+    /// Database opened successfully and is ready to use.
+    DatabaseReady(Connection),
+    /// Database failed to open — app continues without history.
+    DatabaseFailed(String),
+    // ── History ───────────────────────────────────────────────────────────────
+    /// Open the history context drawer and load entries.
+    HistoryOpen,
+    /// History entries loaded from DB.
+    HistoryLoaded(Vec<HistoryEntry>),
+    /// User typed in the history filter field.
+    HistoryFilterChanged(String),
+    /// User changed the history sort order.
+    HistorySortChanged(HistorySort),
+    /// User clicked a history entry to navigate.
+    HistoryNavigate(String),
+    /// User clicked the delete button on a history entry.
+    HistoryDeleteEntry(i64),
+    /// History entry deletion confirmed.
+    HistoryEntryDeleted(i64),
+    /// History context drawer closed via its X button.
+    HistoryClose,
+    /// Background history log write finished; no UI update needed.
+    VisitLogged,
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -149,6 +177,15 @@ pub struct App {
     context_menu: Option<ContextMenu>,
     /// Items from the most recent Servo context menu; cleared after selection or dismiss.
     context_items: Vec<ContextMenuItem>,
+    // ── Database & history ────────────────────────────────────────────────────
+    /// Live database connection; None until the async open task completes.
+    db: Option<Connection>,
+    /// History entries currently shown in the context drawer.
+    history_entries: Vec<HistoryEntry>,
+    /// Active filter text for the history drawer.
+    history_filter: String,
+    /// Active sort order for the history drawer.
+    history_sort: HistorySort,
 }
 
 impl App {
@@ -196,6 +233,25 @@ impl App {
         }
         // Dropping the entity also drops the associated TabState.
         self.tabs.remove(id);
+    }
+
+    /// Issue a DB query and send the results back as `HistoryLoaded`.
+    fn reload_history(&self) -> Task<Message> {
+        let Some(conn) = self.db.clone() else {
+            return Task::none();
+        };
+        let filter = self.history_filter.clone();
+        let sort = self.history_sort;
+        Task::perform(
+            async move { crate::db::query_history(conn, filter, sort, 50).await },
+            |result| match result {
+                Ok(entries) => libcosmic::action::app(Message::HistoryLoaded(entries)),
+                Err(e) => {
+                    tracing::warn!("History query failed: {e}");
+                    libcosmic::action::app(Message::HistoryLoaded(vec![]))
+                }
+            },
+        )
     }
 
     /// Update the window title to match the currently active tab.
@@ -266,8 +322,20 @@ impl libcosmic::Application for App {
             current_size: initial_size,
             context_menu: None,
             context_items: Vec::new(),
+            db: None,
+            history_entries: Vec::new(),
+            history_filter: String::new(),
+            history_sort: HistorySort::default(),
         };
-        (app, Task::none())
+
+        let db_task = Task::perform(
+            async { crate::db::open(crate::db::db_path()).await },
+            |result| match result {
+                Ok(conn) => libcosmic::action::app(Message::DatabaseReady(conn)),
+                Err(e) => libcosmic::action::app(Message::DatabaseFailed(e.to_string())),
+            },
+        );
+        (app, db_task)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -357,6 +425,28 @@ impl libcosmic::Application for App {
                             }
                         }
                         None => {}
+                    }
+                }
+
+                // Log URL changes for the active tab. Only fires when the URL
+                // actually changes so repeated wake signals don't spam the DB.
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Some(url) = tab.servo.current_url()
+                {
+                    let url_str = url.to_string();
+                    if tab.logged_url.as_deref() != Some(&url_str)
+                        && let Some(conn) = self.db.clone()
+                    {
+                        let title = tab.servo.title().unwrap_or_default();
+                        tab.logged_url = Some(url_str.clone());
+                        return Task::perform(
+                            async move {
+                                if let Err(e) = crate::db::log_visit(conn, url_str, title).await {
+                                    tracing::warn!("History log failed: {e}");
+                                }
+                            },
+                            |_| libcosmic::action::app(Message::VisitLogged),
+                        );
                     }
                 }
             }
@@ -481,9 +571,91 @@ impl libcosmic::Application for App {
                 self.tabs.activate(id);
                 self.dismiss_context_menu();
             }
+
+            // ── Database ──────────────────────────────────────────────────────
+            Message::DatabaseReady(conn) => {
+                self.db = Some(conn);
+            }
+
+            Message::DatabaseFailed(reason) => {
+                tracing::error!("Database failed to open: {reason}");
+            }
+
+            // ── History ───────────────────────────────────────────────────────
+            Message::HistoryOpen => {
+                self.core_mut().set_show_context(true);
+                return self.reload_history();
+            }
+
+            Message::HistoryLoaded(entries) => {
+                self.history_entries = entries;
+            }
+
+            Message::HistoryFilterChanged(filter) => {
+                self.history_filter = filter;
+                return self.reload_history();
+            }
+
+            Message::HistorySortChanged(sort) => {
+                self.history_sort = sort;
+                return self.reload_history();
+            }
+
+            Message::HistoryNavigate(url) => {
+                self.core_mut().set_show_context(false);
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Ok(parsed) = Url::parse(&url)
+                {
+                    tab.url_bar_text = url;
+                    tab.servo.navigate(parsed);
+                }
+            }
+
+            Message::HistoryDeleteEntry(id) => {
+                if let Some(conn) = self.db.clone() {
+                    return Task::perform(
+                        async move { crate::db::delete_history_entry(conn, id).await },
+                        move |_| libcosmic::action::app(Message::HistoryEntryDeleted(id)),
+                    );
+                }
+            }
+
+            Message::HistoryEntryDeleted(id) => {
+                self.history_entries.retain(|e| e.id != id);
+            }
+
+            Message::HistoryClose => {
+                self.core_mut().set_show_context(false);
+            }
+
+            Message::VisitLogged => {}
         }
 
         Task::none()
+    }
+
+    fn context_drawer(&self) -> Option<context_drawer::ContextDrawer<'_, Message>> {
+        if !self.core().window.show_context {
+            return None;
+        }
+        Some(
+            context_drawer::context_drawer(
+                pages::history::view(
+                    &self.history_entries,
+                    &self.history_filter,
+                    self.history_sort,
+                ),
+                Message::HistoryClose,
+            )
+            .title("History"),
+        )
+    }
+
+    fn header_end(&self) -> Vec<Element<'_, Message>> {
+        let history_btn =
+            widget::button::icon(widget::icon::from_name("document-open-recent-symbolic"))
+                .on_press(Message::HistoryOpen);
+        vec![history_btn.into()]
     }
 
     fn header_center(&self) -> Vec<Element<'_, Message>> {
