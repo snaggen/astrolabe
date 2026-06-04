@@ -10,10 +10,6 @@ cosmic-config = { path = "../cosmic-epoch/libcosmic/cosmic-config" }
 cosmic-webview = { path = "../cosmic-webview", features = ["xdg-portal"] }
 libcosmic = { package = "libcosmic", path = "../cosmic-epoch/libcosmic", features = ["winit", "wgpu"] }
 
-# Servo types used directly: InputEvent, ContextMenu, ContextMenuAction, etc.
-# Must match the revision used by cosmic-webview to ensure a single compiled instance.
-servo = { git = "https://github.com/servo/servo", rev = "c2f705ca2ff", default-features = false, features = ["js_jit", "vello", "baked-in-resources"] }
-
 async-channel = "2"
 dpi = "0.1"
 tracing = "0.1"

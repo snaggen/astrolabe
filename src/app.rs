@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use cosmic_webview::{DialogMsg, WebViewWidget};
+use cosmic_webview::{
+    ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EditingActionEvent,
+    EmbedderControl, InputEvent, WebViewWidget,
+};
 use dpi::PhysicalSize;
 use libcosmic::app::{Core, Task};
 use libcosmic::executor;
@@ -10,10 +13,6 @@ use libcosmic::prelude::*;
 use libcosmic::widget;
 use libcosmic::widget::menu::{self, action::MenuAction};
 use libcosmic::widget::segmented_button;
-use servo::{
-    ContextMenu, ContextMenuAction, ContextMenuItem, EditingActionEvent, EmbedderControl,
-    InputEvent,
-};
 use url::Url;
 
 use crate::tabs::TabState;
@@ -509,7 +508,7 @@ impl libcosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        use servo::LoadStatus;
+        use cosmic_webview::LoadStatus;
 
         let Some(tab) = self.tabs.active_data::<TabState>() else {
             return widget::text("No active tab").into();
