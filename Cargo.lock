@@ -1777,12 +1777,14 @@ dependencies = [
 name = "cosmic-webview"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "async-channel",
  "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "euclid",
  "gleam",
  "glow 0.17.0",
  "iced_wgpu",
+ "khronos-egl",
  "libcosmic",
  "rustls",
  "servo",

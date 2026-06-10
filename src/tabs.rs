@@ -1,5 +1,5 @@
 use async_channel::Receiver;
-use cosmic_webview::{ServoState, WebViewFrame};
+use cosmic_webview::ServoState;
 use dpi::PhysicalSize;
 use url::Url;
 
@@ -8,9 +8,11 @@ use url::Url;
 /// The URL bar belongs here (not at the window level) so each tab
 /// independently remembers its address field text and focus state —
 /// the same way Firefox does it.
+///
+/// The frame buffer lives inside [`ServoState`]; the engine fills it
+/// directly and `view()` passes `servo.frame()` to the webview widget.
 pub struct TabState {
     pub servo: ServoState,
-    pub frame: WebViewFrame,
     /// Current text in this tab's URL bar.
     pub url_bar_text: String,
     /// True while this tab's URL bar has keyboard focus.
@@ -28,7 +30,6 @@ impl TabState {
         (
             Self {
                 servo,
-                frame: WebViewFrame::new(),
                 url_bar_text,
                 url_bar_focused: false,
                 logged_url: None,

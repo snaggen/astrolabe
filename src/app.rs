@@ -317,6 +317,19 @@ impl App {
         self.context_items.clear();
     }
 
+    /// Sync per-tab readback with the active tab: hidden tabs skip
+    /// compositing and pixel readback entirely. Call after any change to
+    /// which tab is active.
+    fn sync_tab_visibility(&mut self) {
+        let ids: Vec<_> = self.tabs.iter().collect();
+        for id in ids {
+            let is_active = self.tabs.is_active(id);
+            if let Some(tab) = self.tabs.data::<TabState>(id) {
+                tab.servo.set_visible(is_active);
+            }
+        }
+    }
+
     /// Create a new tab loading `url` and register it in the tab model.
     /// The caller is responsible for activating the returned entity.
     fn add_tab(&mut self, url: Url) -> segmented_button::Entity {
@@ -574,10 +587,9 @@ impl libcosmic::Application for App {
 
                         let title = tab.servo.title();
 
-                        if is_active && let Some(img) = tab.servo.current_frame().as_ref() {
-                            let (w, h) = img.dimensions();
-                            tab.frame.update(w, h, img.as_raw());
-                        }
+                        // No frame copying here: the engine fills the shared
+                        // frame buffer directly and the widget uploads it on
+                        // the next draw. See cosmic-webview's FrameSink.
 
                         let crash = tab.servo.take_crash();
                         (title, dialog, crash)
@@ -961,12 +973,14 @@ impl libcosmic::Application for App {
 
             Message::TabActivated(id) => {
                 self.tabs.activate(id);
+                self.sync_tab_visibility();
                 self.dismiss_context_menu();
                 self.sync_active_title();
             }
 
             Message::TabClosed(id) => {
                 self.close_tab(id);
+                self.sync_tab_visibility();
                 self.sync_active_title();
             }
 
@@ -974,6 +988,7 @@ impl libcosmic::Application for App {
                 let url = self.startup_url();
                 let id = self.add_tab(url);
                 self.tabs.activate(id);
+                self.sync_tab_visibility();
                 self.dismiss_context_menu();
             }
 
@@ -1291,7 +1306,7 @@ impl libcosmic::Application for App {
             .push(url_bar)
             .push(bookmark_btn);
 
-        let webview = WebViewWidget::new(&tab.frame)
+        let webview = WebViewWidget::new(tab.servo.frame())
             .scale(self.scale)
             .on_input(Message::Input)
             .on_resize(Message::WebViewResized)
