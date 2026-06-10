@@ -166,6 +166,8 @@ pub enum Message {
     TabNext,
     /// Activate the previous tab, wrapping around (Ctrl+Shift+Tab).
     TabPrev,
+    /// Open a link in a new background tab (middle-click or Ctrl+click).
+    OpenLinkInNewTab(String),
     // ── Zoom ──────────────────────────────────────────────────────────────────
     /// Increase the active tab's page zoom (Ctrl++).
     ZoomIn,
@@ -1115,6 +1117,15 @@ impl libcosmic::Application for App {
             Message::TabNext => self.cycle_tab(true),
             Message::TabPrev => self.cycle_tab(false),
 
+            Message::OpenLinkInNewTab(url) => match Url::parse(&url) {
+                Ok(url) => {
+                    // Open in the background, like Firefox — do not switch tabs.
+                    self.add_tab(url);
+                    self.sync_tab_visibility();
+                }
+                Err(e) => tracing::warn!("Ignoring middle-click link {url:?}: {e}"),
+            },
+
             // ── Zoom ──────────────────────────────────────────────────────────
             Message::ZoomIn => self.adjust_zoom(ZOOM_STEP),
             Message::ZoomOut => self.adjust_zoom(-ZOOM_STEP),
@@ -1455,8 +1466,10 @@ impl libcosmic::Application for App {
         let webview = WebViewWidget::new(tab.servo.frame())
             .scale(self.scale)
             .cursor(tab.servo.cursor())
+            .hovered_link(tab.servo.hovered_link())
             .context_menu(menu_items)
             .on_input(Message::Input)
+            .on_open_link(Message::OpenLinkInNewTab)
             .on_resize(Message::WebViewResized)
             .keyboard_enabled(!tab.url_bar_focused);
 
