@@ -430,7 +430,7 @@ impl Hash for ServoRx {
 
 impl libcosmic::Application for App {
     type Executor = executor::Default;
-    type Flags = ();
+    type Flags = Option<Url>;
     type Message = Message;
 
     const APP_ID: &'static str = "io.github.snaggen.CosmicWeb";
@@ -443,7 +443,7 @@ impl libcosmic::Application for App {
         &mut self.core
     }
 
-    fn init(core: Core, _flags: ()) -> (Self, Task<Message>) {
+    fn init(core: Core, flags: Option<Url>) -> (Self, Task<Message>) {
         let scale = std::env::var("COSMIC_SCALE")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
@@ -461,14 +461,14 @@ impl libcosmic::Application for App {
             .unwrap_or_default();
 
         let initial_size = PhysicalSize::new(1280u32, 800);
-        let initial_url = match &config.startup_page {
+        let initial_url = flags.unwrap_or_else(|| match &config.startup_page {
             StartupPage::Url(u) => Url::parse(u).unwrap_or_else(|_| {
                 Url::parse("about:blank").expect("about:blank is always valid")
             }),
             StartupPage::SearchEngine | StartupPage::NewTab => {
                 Url::parse("about:blank").expect("about:blank is always valid")
             }
-        };
+        });
 
         let (first_tab, servo_rx) = TabState::new(initial_url, initial_size, scale);
 
@@ -1306,20 +1306,21 @@ impl libcosmic::Application for App {
             .push(url_bar)
             .push(bookmark_btn);
 
-        let webview = WebViewWidget::new(tab.servo.frame())
-            .scale(self.scale)
-            .on_input(Message::Input)
-            .on_resize(Message::WebViewResized)
-            .keyboard_enabled(!tab.url_bar_focused);
-
         let menu_items = if self.context_items.is_empty() {
             build_default_menu(can_back, can_forward)
         } else {
             build_servo_menu(&self.context_items)
         };
 
-        let webview_area =
-            widget::container(widget::context_menu(webview, Some(menu_items))).height(Length::Fill);
+        let webview = WebViewWidget::new(tab.servo.frame())
+            .scale(self.scale)
+            .cursor(tab.servo.cursor())
+            .context_menu(menu_items)
+            .on_input(Message::Input)
+            .on_resize(Message::WebViewResized)
+            .keyboard_enabled(!tab.url_bar_focused);
+
+        let webview_area = widget::container(webview).height(Length::Fill);
 
         // Always keep the popover in the widget tree so the text input's widget
         // ID stays stable and focus is not reset when suggestions appear.
