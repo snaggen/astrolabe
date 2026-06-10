@@ -26,6 +26,16 @@ use crate::tabs::TabState;
 use crate::url_bar;
 use cosmic_config::CosmicConfigEntry as _;
 
+/// Stable widget id for the URL bar text input, so keyboard shortcuts can move
+/// focus to it (Ctrl+L). Must stay constant across `view()` calls.
+static URL_BAR_ID: std::sync::LazyLock<widget::Id> =
+    std::sync::LazyLock::new(|| widget::Id::new("url_bar_input"));
+
+/// Page-zoom step applied per Ctrl+± press, and the clamp bounds.
+const ZOOM_STEP: f32 = 0.1;
+const ZOOM_MIN: f32 = 0.3;
+const ZOOM_MAX: f32 = 5.0;
+
 // ── Context menu ──────────────────────────────────────────────────────────────
 
 /// Unified action for both static fallback items and Servo-provided items.
@@ -150,6 +160,21 @@ pub enum Message {
     TabClosed(segmented_button::Entity),
     /// User requested a new tab.
     TabNew,
+    /// Close the currently active tab (Ctrl+W).
+    TabCloseActive,
+    /// Activate the next tab, wrapping around (Ctrl+Tab).
+    TabNext,
+    /// Activate the previous tab, wrapping around (Ctrl+Shift+Tab).
+    TabPrev,
+    // ── Zoom ──────────────────────────────────────────────────────────────────
+    /// Increase the active tab's page zoom (Ctrl++).
+    ZoomIn,
+    /// Decrease the active tab's page zoom (Ctrl+-).
+    ZoomOut,
+    /// Reset the active tab's page zoom to 100 % (Ctrl+0).
+    ZoomReset,
+    /// Move keyboard focus to the URL bar and select its contents (Ctrl+L).
+    FocusUrlBar,
     // ── Awesomebar ────────────────────────────────────────────────────────────
     /// Suggestion list loaded from history + bookmarks for the current input.
     SuggestionsReady(Vec<Suggestion>),
@@ -266,6 +291,68 @@ pub struct App {
     bookmarked_urls: HashSet<String>,
 }
 
+/// Maps a key press to a browser action, implementing Firefox-compatible
+/// keyboard shortcuts. Returns `None` for keys with no binding.
+///
+/// Unmodified Escape / arrow keys drive the awesomebar suggestion popup; the
+/// Ctrl/Alt combinations are the browser chrome shortcuts (new tab, zoom, etc.).
+fn shortcut_to_message(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+    use keyboard::key::Named;
+
+    let ctrl = modifiers.control();
+    let alt = modifiers.alt();
+    let shift = modifiers.shift();
+
+    if ctrl && let keyboard::Key::Character(c) = key {
+        match c.to_lowercase().as_str() {
+            "t" => return Some(Message::TabNew),
+            "w" => return Some(Message::TabCloseActive),
+            "l" => return Some(Message::FocusUrlBar),
+            "r" => return Some(Message::Reload),
+            // "+" needs Shift on most layouts; "=" is the same physical key.
+            "+" | "=" => return Some(Message::ZoomIn),
+            "-" => return Some(Message::ZoomOut),
+            "0" => return Some(Message::ZoomReset),
+            _ => {}
+        }
+    }
+
+    if ctrl && let keyboard::Key::Named(Named::Tab) = key {
+        return Some(if shift {
+            Message::TabPrev
+        } else {
+            Message::TabNext
+        });
+    }
+
+    if alt && let keyboard::Key::Named(named) = key {
+        match named {
+            Named::ArrowLeft => return Some(Message::GoBack),
+            Named::ArrowRight => return Some(Message::GoForward),
+            _ => {}
+        }
+    }
+
+    if let keyboard::Key::Named(Named::F5) = key {
+        return Some(Message::Reload);
+    }
+
+    // Unmodified keys drive the suggestion popup.
+    if !ctrl
+        && !alt
+        && let keyboard::Key::Named(named) = key
+    {
+        return match named {
+            Named::Escape => Some(Message::SuggestionsClose),
+            Named::ArrowDown => Some(Message::SuggestionNext),
+            Named::ArrowUp => Some(Message::SuggestionPrev),
+            _ => None,
+        };
+    }
+
+    None
+}
+
 impl App {
     /// Parse the active tab's URL bar text, navigate, and unfocus the URL bar.
     ///
@@ -351,6 +438,37 @@ impl App {
         }
         // Dropping the entity also drops the associated TabState.
         self.tabs.remove(id);
+    }
+
+    /// Activate the next (`forward`) or previous tab, wrapping around.
+    /// No-op when there is only one tab.
+    fn cycle_tab(&mut self, forward: bool) {
+        let count = self.tabs.len() as u16;
+        if count <= 1 {
+            return;
+        }
+        let Some(pos) = self.tabs.position(self.tabs.active()) else {
+            return;
+        };
+        let next = if forward {
+            (pos + 1) % count
+        } else {
+            (pos + count - 1) % count
+        };
+        self.tabs.activate_position(next);
+        self.sync_tab_visibility();
+        self.dismiss_context_menu();
+        self.sync_active_title();
+    }
+
+    /// Adjust the active tab's page zoom by `delta`, clamped to the supported
+    /// range. Rounding keeps repeated steps from accumulating float drift.
+    fn adjust_zoom(&mut self, delta: f32) {
+        if let Some(tab) = self.tabs.active_data::<TabState>() {
+            let target = (tab.servo.page_zoom() + delta).clamp(ZOOM_MIN, ZOOM_MAX);
+            let rounded = (target * 100.0).round() / 100.0;
+            tab.servo.set_page_zoom(rounded);
+        }
     }
 
     /// Return the URL to open in new tabs based on the current config.
@@ -524,18 +642,9 @@ impl libcosmic::Application for App {
 
         let window_sub = event::listen_with(|event, _status, _id| match event {
             Event::Window(window::Event::Rescaled(factor)) => Some(Message::ScaleChanged(factor)),
-            Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) => match key {
-                keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                    Some(Message::SuggestionsClose)
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
-                    Some(Message::SuggestionNext)
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
-                    Some(Message::SuggestionPrev)
-                }
-                _ => None,
-            },
+            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                shortcut_to_message(&key, modifiers)
+            }
             _ => None,
         });
 
@@ -990,6 +1099,36 @@ impl libcosmic::Application for App {
                 self.tabs.activate(id);
                 self.sync_tab_visibility();
                 self.dismiss_context_menu();
+                // Focus the URL bar so the user can type an address immediately.
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.url_bar_focused = true;
+                }
+                return widget::text_input::focus(URL_BAR_ID.clone());
+            }
+
+            Message::TabCloseActive => {
+                self.close_tab(self.tabs.active());
+                self.sync_tab_visibility();
+                self.sync_active_title();
+            }
+
+            Message::TabNext => self.cycle_tab(true),
+            Message::TabPrev => self.cycle_tab(false),
+
+            // ── Zoom ──────────────────────────────────────────────────────────
+            Message::ZoomIn => self.adjust_zoom(ZOOM_STEP),
+            Message::ZoomOut => self.adjust_zoom(-ZOOM_STEP),
+            Message::ZoomReset => {
+                if let Some(tab) = self.tabs.active_data::<TabState>() {
+                    tab.servo.set_page_zoom(1.0);
+                }
+            }
+
+            Message::FocusUrlBar => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.url_bar_focused = true;
+                }
+                return widget::text_input::focus(URL_BAR_ID.clone());
             }
 
             // ── Config ────────────────────────────────────────────────────────
@@ -1279,6 +1418,7 @@ impl libcosmic::Application for App {
         };
 
         let url_bar = widget::text_input("https://example.com", &tab.url_bar_text)
+            .id(URL_BAR_ID.clone())
             .on_focus(Message::UrlBarFocused)
             .on_unfocus(Message::UrlBarUnfocused)
             .on_input(Message::UrlBarChanged)
