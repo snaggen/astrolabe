@@ -36,11 +36,8 @@ const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.3;
 const ZOOM_MAX: f32 = 5.0;
 
-/// New Tab grid dimensions. Made configurable in Fas 7b; constant for now.
-const NEW_TAB_COLUMNS: u16 = 4;
-const NEW_TAB_ROWS: u16 = 2;
 /// History rows fetched for the grid; trimmed to the visible cell count in `view`.
-const NEW_TAB_TOP_SITES: usize = 24;
+const NEW_TAB_TOP_SITES: usize = 48;
 
 // ── Context menu ──────────────────────────────────────────────────────────────
 
@@ -137,6 +134,7 @@ enum ContextPage {
     #[default]
     History,
     Bookmarks,
+    Settings,
 }
 
 // ── Application messages ──────────────────────────────────────────────────────
@@ -200,6 +198,19 @@ pub enum Message {
     TopSitesLoaded(Vec<HistoryEntry>),
     /// Pinned sites loaded for the New Tab grid.
     PinnedLoaded(Vec<BookmarkEntry>),
+    // ── Settings ────────────────────────────────────────────────────────────────
+    /// Toggle the settings context drawer.
+    SettingsOpen,
+    /// Settings context drawer closed via its X button.
+    SettingsClose,
+    /// Set the New Tab grid column count.
+    SetNewTabColumns(u16),
+    /// Set the New Tab grid row count.
+    SetNewTabRows(u16),
+    /// Set what new tabs open, by dropdown index (New Tab / URL / Search engine).
+    SetNewTabPageKind(usize),
+    /// Set the fixed URL new tabs open when the "Fixed URL" kind is selected.
+    SetNewTabUrl(String),
     // ── Zoom ──────────────────────────────────────────────────────────────────
     /// Increase the active tab's page zoom (Ctrl++).
     ZoomIn,
@@ -298,6 +309,8 @@ pub struct App {
     context_items: Vec<ContextMenuItem>,
     /// Persistent browser settings loaded from cosmic_config.
     config: BrowserConfig,
+    /// Handle used to write settings back to cosmic_config; None if it failed to open.
+    config_handle: Option<cosmic_config::Config>,
     /// Which page is currently shown in the context drawer.
     context_page: ContextPage,
     // ── Awesomebar ────────────────────────────────────────────────────────────
@@ -589,6 +602,26 @@ impl App {
         Task::batch(vec![top, pinned])
     }
 
+    /// Write a settings change through `cosmic_config`.
+    ///
+    /// The closure runs the generated per-field setter, which both persists the
+    /// value and updates `self.config` in place. Failures are logged, not fatal.
+    fn write_config(
+        &mut self,
+        set: impl FnOnce(
+            &mut BrowserConfig,
+            &cosmic_config::Config,
+        ) -> Result<bool, cosmic_config::Error>,
+    ) {
+        let Some(handle) = self.config_handle.clone() else {
+            tracing::warn!("Cannot save settings: config handle unavailable");
+            return;
+        };
+        if let Err(e) = set(&mut self.config, &handle) {
+            tracing::warn!("Settings write failed: {e}");
+        }
+    }
+
     /// Update the window title to match the currently active tab.
     fn sync_active_title(&mut self) {
         let title = self
@@ -635,9 +668,11 @@ impl libcosmic::Application for App {
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(1.0);
 
-        let config = cosmic_config::Config::new(Self::APP_ID, BrowserConfig::VERSION)
+        let config_handle = cosmic_config::Config::new(Self::APP_ID, BrowserConfig::VERSION).ok();
+        let config = config_handle
+            .as_ref()
             .map(|c| {
-                BrowserConfig::get_entry(&c).unwrap_or_else(|(errs, c)| {
+                BrowserConfig::get_entry(c).unwrap_or_else(|(errs, c)| {
                     for e in errs {
                         tracing::warn!("Config load error: {e}");
                     }
@@ -668,6 +703,7 @@ impl libcosmic::Application for App {
         let app = App {
             core,
             config,
+            config_handle,
             context_page: ContextPage::default(),
             suggestions: Vec::new(),
             suggestion_index: None,
@@ -1238,6 +1274,45 @@ impl libcosmic::Application for App {
                 self.pinned_sites = entries;
             }
 
+            // ── Settings ──────────────────────────────────────────────────────
+            Message::SettingsOpen => {
+                if self.core().window.show_context && self.context_page == ContextPage::Settings {
+                    self.core_mut().set_show_context(false);
+                } else {
+                    self.context_page = ContextPage::Settings;
+                    self.core_mut().set_show_context(true);
+                }
+            }
+
+            Message::SettingsClose => {
+                self.core_mut().set_show_context(false);
+            }
+
+            Message::SetNewTabColumns(n) => {
+                self.write_config(|c, h| c.set_new_tab_columns(h, n));
+            }
+
+            Message::SetNewTabRows(n) => {
+                self.write_config(|c, h| c.set_new_tab_rows(h, n));
+            }
+
+            Message::SetNewTabPageKind(index) => {
+                let page = match index {
+                    // Preserve any existing URL when re-selecting "Fixed URL".
+                    1 => StartupPage::Url(match &self.config.new_tab_page {
+                        StartupPage::Url(u) => u.clone(),
+                        _ => String::from("https://"),
+                    }),
+                    2 => StartupPage::SearchEngine,
+                    _ => StartupPage::NewTab,
+                };
+                self.write_config(|c, h| c.set_new_tab_page(h, page));
+            }
+
+            Message::SetNewTabUrl(url) => {
+                self.write_config(|c, h| c.set_new_tab_page(h, StartupPage::Url(url)));
+            }
+
             // ── Zoom ──────────────────────────────────────────────────────────
             Message::ZoomIn => self.adjust_zoom(ZOOM_STEP),
             Message::ZoomOut => self.adjust_zoom(-ZOOM_STEP),
@@ -1482,6 +1557,11 @@ impl libcosmic::Application for App {
                 Message::BookmarkClose,
             )
             .title("Bookmarks"),
+            ContextPage::Settings => context_drawer::context_drawer(
+                pages::settings::view(&self.config),
+                Message::SettingsClose,
+            )
+            .title("Settings"),
         })
     }
 
@@ -1492,7 +1572,13 @@ impl libcosmic::Application for App {
         let history_btn =
             widget::button::icon(widget::icon::from_name("document-open-recent-symbolic"))
                 .on_press(Message::HistoryOpen);
-        vec![bookmarks_btn.into(), history_btn.into()]
+        let settings_btn = widget::button::icon(widget::icon::from_name("emblem-system-symbolic"))
+            .on_press(Message::SettingsOpen);
+        vec![
+            bookmarks_btn.into(),
+            history_btn.into(),
+            settings_btn.into(),
+        ]
     }
 
     fn header_center(&self) -> Vec<Element<'_, Message>> {
@@ -1578,8 +1664,8 @@ impl libcosmic::Application for App {
             widget::container(pages::new_tab::view(
                 &self.top_sites,
                 &self.pinned_sites,
-                NEW_TAB_COLUMNS,
-                NEW_TAB_ROWS,
+                self.config.new_tab_columns,
+                self.config.new_tab_rows,
             ))
             .height(Length::Fill)
             .into()

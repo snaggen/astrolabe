@@ -164,6 +164,10 @@ pub struct BrowserConfig {
     pub home_url: String,
     /// Search engine used for non-URL input in the address bar.
     pub search_engine: SearchEngine,
+    /// Number of columns in the New Tab page top-sites grid.
+    pub new_tab_columns: u16,
+    /// Number of rows in the New Tab page top-sites grid.
+    pub new_tab_rows: u16,
 }
 
 impl Default for BrowserConfig {
@@ -173,6 +177,8 @@ impl Default for BrowserConfig {
             new_tab_page: StartupPage::NewTab,
             home_url: String::from("https://start.duckduckgo.com"),
             search_engine: SearchEngine::default(),
+            new_tab_columns: 4,
+            new_tab_rows: 2,
         }
     }
 }
