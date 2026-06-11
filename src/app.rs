@@ -431,6 +431,20 @@ fn shortcut_to_message(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> O
     None
 }
 
+/// Whether a key press is a browser-chrome shortcut handled by the window
+/// rather than the page. The webview uses this to avoid forwarding the key to
+/// Servo — otherwise a focused page field would also receive it (e.g. Ctrl+=
+/// would type "=").
+///
+/// Only modified combinations and F5 qualify; the unmodified suggestion keys
+/// (arrows, Escape) must still reach the page when the webview has focus.
+fn is_chrome_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    use keyboard::key::Named;
+    let modified = modifiers.control() || modifiers.alt();
+    let is_f5 = matches!(key, keyboard::Key::Named(Named::F5));
+    (modified || is_f5) && shortcut_to_message(key, modifiers).is_some()
+}
+
 impl App {
     /// Parse the active tab's URL bar text, navigate, and unfocus the URL bar.
     ///
@@ -1907,7 +1921,8 @@ impl libcosmic::Application for App {
                 .on_input(Message::Input)
                 .on_open_link(Message::OpenLinkInNewTab)
                 .on_resize(Message::WebViewResized)
-                .keyboard_enabled(!tab.url_bar_focused);
+                .keyboard_enabled(!tab.url_bar_focused)
+                .shortcut_filter(is_chrome_shortcut);
 
             widget::container(webview).height(Length::Fill).into()
         };
