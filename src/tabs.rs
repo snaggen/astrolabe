@@ -26,6 +26,9 @@ pub struct TabState {
     /// URL whose thumbnail this tab has already captured, to avoid recapturing
     /// the same page on every wake once it has finished loading.
     pub thumb_captured_url: Option<String>,
+    /// Per-site cookie-protection level chosen via the URL-bar indicator, or
+    /// `None` to follow the global default. Reset when the tab navigates.
+    pub cookie_protection_override: Option<crate::config::CookieProtectionLevel>,
 }
 
 impl TabState {
@@ -41,6 +44,7 @@ impl TabState {
                 logged_url: None,
                 show_new_tab_page: false,
                 thumb_captured_url: None,
+                cookie_protection_override: None,
             },
             rx,
         )

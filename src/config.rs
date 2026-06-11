@@ -150,6 +150,32 @@ pub fn extract_search_query(url: &str, engines: &[SearchEngine]) -> Option<Strin
     None
 }
 
+/// Tracker- and cookie-blocking strength.
+///
+/// In Fas 8 this only records the user's choice and drives the URL-bar
+/// indicator; the blocking itself is wired to Servo's network layer in Fas 9.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum CookieProtectionLevel {
+    /// Blocks the common categories (social trackers, cross-site cookies, etc.).
+    #[default]
+    Standard,
+    /// Blocks more aggressively, which may break some sites.
+    Strict,
+    /// User-configured categories.
+    Custom,
+}
+
+impl CookieProtectionLevel {
+    /// Human-readable name shown in the indicator popover.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::Strict => "Strict",
+            Self::Custom => "Custom",
+        }
+    }
+}
+
 /// Persistent browser configuration, stored via `cosmic_config`.
 #[derive(Clone, CosmicConfigEntry, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
@@ -168,6 +194,8 @@ pub struct BrowserConfig {
     pub new_tab_columns: u16,
     /// Number of rows in the New Tab page top-sites grid.
     pub new_tab_rows: u16,
+    /// Default tracker/cookie protection level for new sites.
+    pub cookie_protection: CookieProtectionLevel,
 }
 
 impl Default for BrowserConfig {
@@ -179,6 +207,7 @@ impl Default for BrowserConfig {
             search_engine: SearchEngine::default(),
             new_tab_columns: 4,
             new_tab_rows: 2,
+            cookie_protection: CookieProtectionLevel::default(),
         }
     }
 }

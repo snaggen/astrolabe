@@ -3,7 +3,7 @@ use libcosmic::prelude::*;
 use libcosmic::widget;
 
 use crate::app::Message;
-use crate::config::{BrowserConfig, StartupPage};
+use crate::config::{BrowserConfig, CookieProtectionLevel, StartupPage};
 
 /// Selectable column counts for the New Tab grid.
 const COLUMN_CHOICES: &[u16] = &[3, 4, 5, 6, 7, 8];
@@ -11,6 +11,12 @@ const COLUMN_CHOICES: &[u16] = &[3, 4, 5, 6, 7, 8];
 const ROW_CHOICES: &[u16] = &[1, 2, 3, 4, 5, 6];
 /// New-tab-page kinds, in dropdown order (index maps to a `StartupPage` variant).
 const NEW_TAB_KINDS: &[&str] = &["New Tab page", "Fixed URL", "Search engine"];
+/// Cookie-protection levels, in dropdown order (index maps to the enum).
+const COOKIE_LEVELS: &[CookieProtectionLevel] = &[
+    CookieProtectionLevel::Standard,
+    CookieProtectionLevel::Strict,
+    CookieProtectionLevel::Custom,
+];
 
 /// Settings drawer content: New Tab grid size and what new tabs open.
 pub fn view(config: &BrowserConfig) -> Element<'_, Message> {
@@ -58,7 +64,24 @@ pub fn view(config: &BrowserConfig) -> Element<'_, Message> {
         );
     }
 
-    column.into()
+    let cookie_selected = COOKIE_LEVELS
+        .iter()
+        .position(|&l| l == config.cookie_protection);
+    let cookie_labels: Vec<&str> = COOKIE_LEVELS
+        .iter()
+        .map(CookieProtectionLevel::name)
+        .collect();
+    let cookie_row = widget::row::with_capacity(2)
+        .push(widget::text("Tracking protection").width(Length::Fill))
+        .push(widget::dropdown(cookie_labels, cookie_selected, |i| {
+            Message::SetCookieProtection(COOKIE_LEVELS.get(i).copied().unwrap_or_default())
+        }))
+        .align_y(Alignment::Center);
+
+    column
+        .push(widget::text::title4("Privacy"))
+        .push(cookie_row)
+        .into()
 }
 
 /// A labeled dropdown of integer choices that emits `on_change(value)`.

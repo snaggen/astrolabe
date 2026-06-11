@@ -5,7 +5,7 @@ use libcosmic::prelude::*;
 use libcosmic::widget;
 
 use crate::app::Message;
-use crate::config::{BUILTIN_ENGINES, SearchEngine};
+use crate::config::{BUILTIN_ENGINES, CookieProtectionLevel, SearchEngine};
 use crate::db::{Suggestion, SuggestionKind};
 
 /// Stable widget id for the URL bar text input, so keyboard shortcuts can move
@@ -43,6 +43,7 @@ impl SecurityStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UrlBarPopover {
     Security,
+    Cookie,
     Zoom,
 }
 
@@ -61,6 +62,9 @@ pub struct AddressBar<'a> {
     pub text: &'a str,
     /// Connection security of the active page.
     pub security: SecurityStatus,
+    /// Effective cookie-protection level for the active site (override, else
+    /// the global default).
+    pub cookie_level: CookieProtectionLevel,
     /// Whether the active page is bookmarked (controls the star icon).
     pub is_bookmarked: bool,
     /// Active page zoom (`1.0` = 100 %); the zoom label is hidden at 100 %.
@@ -82,9 +86,16 @@ impl<'a> AddressBar<'a> {
             .style(libcosmic::theme::TextInput::Inline)
             .width(Length::Fill);
 
-        let mut row = widget::row::with_capacity(4).align_y(Alignment::Center);
+        // Cookie and security indicators apply only to real web pages, not to
+        // internal pages like the New Tab page.
+        let is_web_page = self.security != SecurityStatus::Unknown;
+
+        let mut row = widget::row::with_capacity(5).align_y(Alignment::Center);
         if let Some(indicator) = security_indicator(self.security, self.open_popover) {
             row = row.push(indicator);
+        }
+        if is_web_page {
+            row = row.push(cookie_indicator(self.cookie_level, self.open_popover));
         }
         row = row.push(input);
         if let Some(zoom) = zoom_indicator(self.zoom, self.open_popover) {
@@ -108,11 +119,8 @@ fn security_indicator<'a>(
     open: Option<UrlBarPopover>,
 ) -> Option<Element<'a, Message>> {
     let (icon_name, tip) = match security {
-        SecurityStatus::Secure => ("channel-secure-symbolic", "Anslutningen är krypterad"),
-        SecurityStatus::Insecure => (
-            "channel-insecure-symbolic",
-            "Anslutningen är inte krypterad",
-        ),
+        SecurityStatus::Secure => ("channel-secure-symbolic", "Connection is secure"),
+        SecurityStatus::Insecure => ("channel-insecure-symbolic", "Connection is not secure"),
         SecurityStatus::Unknown => return None,
     };
 
@@ -132,16 +140,72 @@ fn security_indicator<'a>(
 /// Popover body shown when the security indicator is clicked.
 fn security_popup<'a>(security: SecurityStatus) -> Element<'a, Message> {
     let body = match security {
-        SecurityStatus::Secure => "Anslutningen till den här sidan är krypterad.",
+        SecurityStatus::Secure => "Your connection to this site is encrypted.",
         SecurityStatus::Insecure => {
-            "Anslutningen till den här sidan är inte krypterad. \
-             Information du skickar kan vara synlig för andra."
+            "Your connection to this site is not encrypted. \
+             Information you send could be visible to others."
         }
-        SecurityStatus::Unknown => "Ingen säkerhetsinformation är tillgänglig för den här sidan.",
+        SecurityStatus::Unknown => "No security information is available for this page.",
     };
     widget::container(widget::text(body))
         .padding(12)
         .width(Length::Fixed(280.0))
+        .class(libcosmic::theme::Container::Dialog)
+        .into()
+}
+
+/// The cookie/tracking-protection indicator: a clickable shield icon with a
+/// hover tooltip and a popover for choosing the per-site level.
+fn cookie_indicator<'a>(
+    level: CookieProtectionLevel,
+    open: Option<UrlBarPopover>,
+) -> Element<'a, Message> {
+    let button = widget::button::icon(widget::icon::from_name("security-medium-symbolic"))
+        .on_press(Message::ToggleUrlBarPopover(UrlBarPopover::Cookie));
+    let anchor = widget::tooltip(
+        button,
+        widget::text(format!("Tracking protection: {}", level.name())),
+        widget::tooltip::Position::Bottom,
+    );
+
+    let mut popover = widget::popover(anchor)
+        .position(widget::popover::Position::Bottom)
+        .on_close(Message::CloseUrlBarPopover);
+    if open == Some(UrlBarPopover::Cookie) {
+        popover = popover.popup(cookie_popup(level));
+    }
+    popover.into()
+}
+
+/// Popover body: the current level and the three selectable options.
+///
+/// Selecting an option sets a per-site override. The choice takes effect once
+/// Fas 9 wires blocking into Servo's network layer.
+fn cookie_popup<'a>(level: CookieProtectionLevel) -> Element<'a, Message> {
+    let mut column = widget::column::with_capacity(4)
+        .spacing(8)
+        .width(Length::Fixed(240.0))
+        .push(widget::text::body("Tracking protection for this site"));
+
+    for option in [
+        CookieProtectionLevel::Standard,
+        CookieProtectionLevel::Strict,
+        CookieProtectionLevel::Custom,
+    ] {
+        let button = if option == level {
+            widget::button::suggested(option.name())
+        } else {
+            widget::button::standard(option.name())
+        };
+        column = column.push(
+            button
+                .on_press(Message::SetCookieProtectionOverride(option))
+                .width(Length::Fill),
+        );
+    }
+
+    widget::container(column)
+        .padding(12)
         .class(libcosmic::theme::Container::Dialog)
         .into()
 }
@@ -158,7 +222,7 @@ fn zoom_indicator<'a>(zoom: f32, open: Option<UrlBarPopover>) -> Option<Element<
         .on_press(Message::ToggleUrlBarPopover(UrlBarPopover::Zoom));
     let anchor = widget::tooltip(
         label,
-        widget::text("Sidzoom – klicka för att justera"),
+        widget::text("Page zoom – click to adjust"),
         widget::tooltip::Position::Bottom,
     );
 
@@ -190,7 +254,7 @@ fn zoom_popup<'a>(percent: i32) -> Element<'a, Message> {
         .spacing(8)
         .align_x(Alignment::Center)
         .push(controls)
-        .push(widget::button::text("Återställ").on_press(Message::ZoomReset));
+        .push(widget::button::text("Reset").on_press(Message::ZoomReset));
 
     widget::container(column)
         .padding(12)

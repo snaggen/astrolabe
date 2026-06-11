@@ -19,7 +19,8 @@ use turso::Connection;
 use url::Url;
 
 use crate::config::{
-    BUILTIN_ENGINES, BrowserConfig, SearchEngine, StartupPage, extract_search_query,
+    BUILTIN_ENGINES, BrowserConfig, CookieProtectionLevel, SearchEngine, StartupPage,
+    extract_search_query,
 };
 use crate::db::{BookmarkEntry, HistoryEntry, HistorySort, Suggestion, SuggestionKind};
 use crate::pages;
@@ -223,6 +224,10 @@ pub enum Message {
     ToggleUrlBarPopover(UrlBarPopover),
     /// Close any open URL-bar indicator popover (e.g. click outside).
     CloseUrlBarPopover,
+    /// Set the global default cookie-protection level (settings drawer).
+    SetCookieProtection(CookieProtectionLevel),
+    /// Set the active tab's per-site cookie-protection override (URL-bar popover).
+    SetCookieProtectionOverride(CookieProtectionLevel),
     // ── Awesomebar ────────────────────────────────────────────────────────────
     /// Suggestion list loaded from history + bookmarks for the current input.
     SuggestionsReady(Vec<Suggestion>),
@@ -441,6 +446,8 @@ impl App {
         tab.url_bar_text = url.to_string();
         tab.url_bar_focused = false;
         tab.show_new_tab_page = false;
+        // A per-site cookie override only applies to the site it was set on.
+        tab.cookie_protection_override = None;
         tab.servo.navigate(url);
 
         let focus_task = libcosmic::iced::widget::operation::focus_next();
@@ -1486,6 +1493,15 @@ impl libcosmic::Application for App {
                 };
             }
             Message::CloseUrlBarPopover => self.url_bar_popover = None,
+            Message::SetCookieProtection(level) => {
+                self.write_config(|c, h| c.set_cookie_protection(h, level));
+            }
+            Message::SetCookieProtectionOverride(level) => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.cookie_protection_override = Some(level);
+                }
+                self.url_bar_popover = None;
+            }
 
             // ── Config ────────────────────────────────────────────────────────
             Message::ConfigChanged(config) => {
@@ -1796,6 +1812,9 @@ impl libcosmic::Application for App {
         let address_bar = url_bar::AddressBar {
             text: &tab.url_bar_text,
             security: SecurityStatus::from_url(&current_url),
+            cookie_level: tab
+                .cookie_protection_override
+                .unwrap_or(self.config.cookie_protection),
             is_bookmarked: self.bookmarked_urls.contains(&current_url),
             zoom: tab.servo.page_zoom(),
             open_popover: self.url_bar_popover,
