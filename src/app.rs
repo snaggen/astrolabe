@@ -24,13 +24,8 @@ use crate::config::{
 use crate::db::{BookmarkEntry, HistoryEntry, HistorySort, Suggestion, SuggestionKind};
 use crate::pages;
 use crate::tabs::TabState;
-use crate::url_bar;
+use crate::url_bar::{self, SecurityStatus, UrlBarPopover};
 use cosmic_config::CosmicConfigEntry as _;
-
-/// Stable widget id for the URL bar text input, so keyboard shortcuts can move
-/// focus to it (Ctrl+L). Must stay constant across `view()` calls.
-static URL_BAR_ID: std::sync::LazyLock<widget::Id> =
-    std::sync::LazyLock::new(|| widget::Id::new("url_bar_input"));
 
 /// Page-zoom step applied per Ctrl+± press, and the clamp bounds.
 const ZOOM_STEP: f32 = 0.1;
@@ -223,6 +218,11 @@ pub enum Message {
     ZoomReset,
     /// Move keyboard focus to the URL bar and select its contents (Ctrl+L).
     FocusUrlBar,
+    // ── URL-bar indicators ──────────────────────────────────────────────────────
+    /// Toggle a URL-bar indicator popover (open it, or close it if already open).
+    ToggleUrlBarPopover(UrlBarPopover),
+    /// Close any open URL-bar indicator popover (e.g. click outside).
+    CloseUrlBarPopover,
     // ── Awesomebar ────────────────────────────────────────────────────────────
     /// Suggestion list loaded from history + bookmarks for the current input.
     SuggestionsReady(Vec<Suggestion>),
@@ -347,6 +347,9 @@ pub struct App {
     /// Best cached image (thumbnail, else favicon) per grid URL. Rebuilt when
     /// the grid data changes or a thumbnail/favicon finishes writing.
     tile_images: HashMap<String, PathBuf>,
+    // ── URL-bar indicators ────────────────────────────────────────────────────
+    /// Which URL-bar indicator popover is open, if any.
+    url_bar_popover: Option<UrlBarPopover>,
 }
 
 /// Maps a key press to a browser action, implementing Firefox-compatible
@@ -852,6 +855,7 @@ impl libcosmic::Application for App {
             top_sites: Vec::new(),
             pinned_sites: Vec::new(),
             tile_images: HashMap::new(),
+            url_bar_popover: None,
         };
 
         let db_task = Task::perform(
@@ -1345,7 +1349,7 @@ impl libcosmic::Application for App {
                     tab.url_bar_focused = true;
                 }
                 return Task::batch(vec![
-                    widget::text_input::focus(URL_BAR_ID.clone()),
+                    widget::text_input::focus(url_bar::URL_BAR_ID.clone()),
                     self.reload_new_tab(),
                 ]);
             }
@@ -1470,8 +1474,18 @@ impl libcosmic::Application for App {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
                     tab.url_bar_focused = true;
                 }
-                return widget::text_input::focus(URL_BAR_ID.clone());
+                return widget::text_input::focus(url_bar::URL_BAR_ID.clone());
             }
+
+            // ── URL-bar indicators ──────────────────────────────────────────────
+            Message::ToggleUrlBarPopover(which) => {
+                self.url_bar_popover = if self.url_bar_popover == Some(which) {
+                    None
+                } else {
+                    Some(which)
+                };
+            }
+            Message::CloseUrlBarPopover => self.url_bar_popover = None,
 
             // ── Config ────────────────────────────────────────────────────────
             Message::ConfigChanged(config) => {
@@ -1773,34 +1787,25 @@ impl libcosmic::Application for App {
                 .on_press(Message::Reload)
         };
 
-        let url_bar = widget::text_input("https://example.com", &tab.url_bar_text)
-            .id(URL_BAR_ID.clone())
-            .on_focus(Message::UrlBarFocused)
-            .on_unfocus(Message::UrlBarUnfocused)
-            .on_input(Message::UrlBarChanged)
-            .on_submit(|_| Message::Navigate)
-            .select_on_focus(true)
-            .width(Length::Fill);
-
         let current_url = tab
             .servo
             .current_url()
             .map(|u| u.to_string())
             .unwrap_or_default();
-        let star_icon = if self.bookmarked_urls.contains(&current_url) {
-            "starred-symbolic"
-        } else {
-            "non-starred-symbolic"
-        };
-        let bookmark_btn = widget::button::icon(widget::icon::from_name(star_icon))
-            .on_press(Message::BookmarkToggle);
 
-        let nav_row = widget::row::with_capacity(5)
+        let address_bar = url_bar::AddressBar {
+            text: &tab.url_bar_text,
+            security: SecurityStatus::from_url(&current_url),
+            is_bookmarked: self.bookmarked_urls.contains(&current_url),
+            open_popover: self.url_bar_popover,
+        }
+        .view();
+
+        let nav_row = widget::row::with_capacity(4)
             .push(back)
             .push(forward)
             .push(reload_or_stop)
-            .push(url_bar)
-            .push(bookmark_btn);
+            .push(address_bar);
 
         // Show the internal New Tab page instead of the webview when this tab
         // opened on it and has not navigated yet.
