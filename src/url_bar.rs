@@ -1,5 +1,6 @@
 use std::sync::LazyLock;
 
+use cosmic_webview::PermissionFeature;
 use libcosmic::iced::{Alignment, Length};
 use libcosmic::prelude::*;
 use libcosmic::widget;
@@ -44,6 +45,7 @@ impl SecurityStatus {
 pub enum UrlBarPopover {
     Security,
     Cookie,
+    Permissions,
     Zoom,
 }
 
@@ -65,6 +67,9 @@ pub struct AddressBar<'a> {
     /// Effective cookie-protection level for the active site (override, else
     /// the global default).
     pub cookie_level: CookieProtectionLevel,
+    /// Permissions the user has granted for the active page; the indicator is
+    /// hidden when empty.
+    pub permissions: &'a [PermissionFeature],
     /// Whether the active page is bookmarked (controls the star icon).
     pub is_bookmarked: bool,
     /// Active page zoom (`1.0` = 100 %); the zoom label is hidden at 100 %.
@@ -96,6 +101,9 @@ impl<'a> AddressBar<'a> {
         }
         if is_web_page {
             row = row.push(cookie_indicator(self.cookie_level, self.open_popover));
+        }
+        if let Some(indicator) = permission_indicator(self.permissions, self.open_popover) {
+            row = row.push(indicator);
         }
         row = row.push(input);
         if let Some(zoom) = zoom_indicator(self.zoom, self.open_popover) {
@@ -207,6 +215,95 @@ fn cookie_popup<'a>(level: CookieProtectionLevel) -> Element<'a, Message> {
     widget::container(column)
         .padding(12)
         .class(libcosmic::theme::Container::Dialog)
+        .into()
+}
+
+/// Human-readable name for a permission feature.
+fn permission_label(feature: PermissionFeature) -> &'static str {
+    match feature {
+        PermissionFeature::Geolocation => "Location",
+        PermissionFeature::Notifications => "Notifications",
+        PermissionFeature::Push => "Push messages",
+        PermissionFeature::Midi => "MIDI devices",
+        PermissionFeature::Camera => "Camera",
+        PermissionFeature::Microphone => "Microphone",
+        PermissionFeature::Speaker => "Speaker selection",
+        PermissionFeature::DeviceInfo => "Device information",
+        PermissionFeature::BackgroundSync => "Background sync",
+        PermissionFeature::Bluetooth => "Bluetooth",
+        PermissionFeature::PersistentStorage => "Persistent storage",
+        PermissionFeature::ScreenWakeLock => "Screen wake lock",
+    }
+}
+
+/// The permissions indicator: a key icon shown only when the page has active
+/// grants. Clicking it lists them with a revoke action.
+fn permission_indicator<'a>(
+    permissions: &[PermissionFeature],
+    open: Option<UrlBarPopover>,
+) -> Option<Element<'a, Message>> {
+    if permissions.is_empty() {
+        return None;
+    }
+
+    let button = widget::button::icon(widget::icon::from_name("dialog-password-symbolic"))
+        .on_press(Message::ToggleUrlBarPopover(UrlBarPopover::Permissions));
+    let anchor = widget::tooltip(
+        button,
+        widget::text("Site permissions"),
+        widget::tooltip::Position::Bottom,
+    );
+
+    let mut popover = widget::popover(anchor)
+        .position(widget::popover::Position::Bottom)
+        .on_close(Message::CloseUrlBarPopover);
+    if open == Some(UrlBarPopover::Permissions) {
+        popover = popover.popup(permission_popup(permissions));
+    }
+    Some(popover.into())
+}
+
+/// Popover body listing each granted permission with a revoke button.
+fn permission_popup<'a>(permissions: &[PermissionFeature]) -> Element<'a, Message> {
+    let mut column = widget::column::with_capacity(permissions.len() + 1)
+        .spacing(8)
+        .width(Length::Fixed(260.0))
+        .push(widget::text::body("Permissions for this site"));
+
+    for &feature in permissions {
+        let row = widget::row::with_capacity(2)
+            .align_y(Alignment::Center)
+            .push(widget::text(permission_label(feature)).width(Length::Fill))
+            .push(widget::button::text("Revoke").on_press(Message::PermissionRevoke(feature)));
+        column = column.push(row);
+    }
+
+    widget::container(column)
+        .padding(12)
+        .class(libcosmic::theme::Container::Dialog)
+        .into()
+}
+
+/// Inline banner that asks the user to allow or block a permission request.
+/// Shown below the toolbar while a request is pending.
+pub fn permission_prompt<'a>(feature: PermissionFeature) -> Element<'a, Message> {
+    let row = widget::row::with_capacity(3)
+        .align_y(Alignment::Center)
+        .spacing(8)
+        .push(
+            widget::text(format!(
+                "This site is requesting access to: {}",
+                permission_label(feature)
+            ))
+            .width(Length::Fill),
+        )
+        .push(widget::button::standard("Block").on_press(Message::PermissionDeny))
+        .push(widget::button::suggested("Allow").on_press(Message::PermissionAllow));
+
+    widget::container(row)
+        .padding(8)
+        .width(Length::Fill)
+        .class(libcosmic::theme::Container::Primary)
         .into()
 }
 

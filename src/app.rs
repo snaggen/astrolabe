@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use cosmic_webview::{
     ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EditingActionEvent,
-    EmbedderControl, InputEvent, WebViewWidget,
+    EmbedderControl, InputEvent, PermissionFeature, WebViewWidget,
 };
 use dpi::PhysicalSize;
 use libcosmic::app::context_drawer;
@@ -35,6 +35,12 @@ const ZOOM_MAX: f32 = 5.0;
 
 /// History rows fetched for the grid; trimmed to the visible cell count in `view`.
 const NEW_TAB_TOP_SITES: usize = 48;
+
+/// Compare two permission features by variant. `PermissionFeature` is `Copy`
+/// but does not implement `PartialEq`, so we match on the discriminant.
+fn same_feature(a: PermissionFeature, b: PermissionFeature) -> bool {
+    std::mem::discriminant(&a) == std::mem::discriminant(&b)
+}
 
 // ── Context menu ──────────────────────────────────────────────────────────────
 
@@ -228,6 +234,12 @@ pub enum Message {
     SetCookieProtection(CookieProtectionLevel),
     /// Set the active tab's per-site cookie-protection override (URL-bar popover).
     SetCookieProtectionOverride(CookieProtectionLevel),
+    /// Allow the active tab's pending permission request.
+    PermissionAllow,
+    /// Deny the active tab's pending permission request.
+    PermissionDeny,
+    /// Revoke a previously granted permission (permissions popover).
+    PermissionRevoke(PermissionFeature),
     // ── Awesomebar ────────────────────────────────────────────────────────────
     /// Suggestion list loaded from history + bookmarks for the current input.
     SuggestionsReady(Vec<Suggestion>),
@@ -448,6 +460,9 @@ impl App {
         tab.show_new_tab_page = false;
         // A per-site cookie override only applies to the site it was set on.
         tab.cookie_protection_override = None;
+        // Granted permissions and any unanswered request belong to the old page.
+        tab.granted_permissions.clear();
+        tab.pending_permission = None;
         tab.servo.navigate(url);
 
         let focus_task = libcosmic::iced::widget::operation::focus_next();
@@ -936,6 +951,12 @@ impl libcosmic::Application for App {
                             && let Some(url) = tab.servo.current_url()
                         {
                             tab.url_bar_text = url.to_string();
+                        }
+
+                        // A page may ask for a permission (geolocation, camera, …);
+                        // hold it until the user answers via the prompt banner.
+                        if let Some(request) = tab.servo.take_permission_request() {
+                            tab.pending_permission = Some(request);
                         }
 
                         let title = tab.servo.title();
@@ -1502,6 +1523,37 @@ impl libcosmic::Application for App {
                 }
                 self.url_bar_popover = None;
             }
+            Message::PermissionAllow => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Some(request) = tab.pending_permission.take()
+                {
+                    let feature = request.feature();
+                    if !tab
+                        .granted_permissions
+                        .iter()
+                        .any(|g| same_feature(*g, feature))
+                    {
+                        tab.granted_permissions.push(feature);
+                    }
+                    request.allow();
+                }
+            }
+            Message::PermissionDeny => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Some(request) = tab.pending_permission.take()
+                {
+                    request.deny();
+                }
+            }
+            Message::PermissionRevoke(feature) => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    // We can only drop our own record; Servo exposes no way to
+                    // rescind a grant it already made.
+                    tab.granted_permissions
+                        .retain(|g| !same_feature(*g, feature));
+                }
+                self.url_bar_popover = None;
+            }
 
             // ── Config ────────────────────────────────────────────────────────
             Message::ConfigChanged(config) => {
@@ -1815,6 +1867,7 @@ impl libcosmic::Application for App {
             cookie_level: tab
                 .cookie_protection_override
                 .unwrap_or(self.config.cookie_protection),
+            permissions: &tab.granted_permissions,
             is_bookmarked: self.bookmarked_urls.contains(&current_url),
             zoom: tab.servo.page_zoom(),
             open_popover: self.url_bar_popover,
@@ -1881,9 +1934,11 @@ impl libcosmic::Application for App {
             }
         };
 
-        widget::column::with_capacity(2)
-            .push(nav_area)
-            .push(content_area)
-            .into()
+        let mut root = widget::column::with_capacity(3).push(nav_area);
+        // Show a permission prompt banner below the toolbar while one is pending.
+        if let Some(request) = &tab.pending_permission {
+            root = root.push(url_bar::permission_prompt(request.feature()));
+        }
+        root.push(content_area).into()
     }
 }
