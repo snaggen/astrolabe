@@ -43,6 +43,7 @@ impl SecurityStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UrlBarPopover {
     Security,
+    Zoom,
 }
 
 /// The address bar field: a single input-looking control with clickable
@@ -62,6 +63,8 @@ pub struct AddressBar<'a> {
     pub security: SecurityStatus,
     /// Whether the active page is bookmarked (controls the star icon).
     pub is_bookmarked: bool,
+    /// Active page zoom (`1.0` = 100 %); the zoom label is hidden at 100 %.
+    pub zoom: f32,
     /// Which indicator popover is currently open, if any.
     pub open_popover: Option<UrlBarPopover>,
 }
@@ -79,11 +82,15 @@ impl<'a> AddressBar<'a> {
             .style(libcosmic::theme::TextInput::Inline)
             .width(Length::Fill);
 
-        let mut row = widget::row::with_capacity(3).align_y(Alignment::Center);
+        let mut row = widget::row::with_capacity(4).align_y(Alignment::Center);
         if let Some(indicator) = security_indicator(self.security, self.open_popover) {
             row = row.push(indicator);
         }
-        row = row.push(input).push(bookmark_button(self.is_bookmarked));
+        row = row.push(input);
+        if let Some(zoom) = zoom_indicator(self.zoom, self.open_popover) {
+            row = row.push(zoom);
+        }
+        row = row.push(bookmark_button(self.is_bookmarked));
 
         widget::container(row)
             .padding([0, 4])
@@ -135,6 +142,58 @@ fn security_popup<'a>(security: SecurityStatus) -> Element<'a, Message> {
     widget::container(widget::text(body))
         .padding(12)
         .width(Length::Fixed(280.0))
+        .class(libcosmic::theme::Container::Dialog)
+        .into()
+}
+
+/// The zoom indicator: a percentage label shown only when zoom differs from
+/// 100 %. Clicking it opens a popover with zoom controls.
+fn zoom_indicator<'a>(zoom: f32, open: Option<UrlBarPopover>) -> Option<Element<'a, Message>> {
+    let percent = (zoom * 100.0).round() as i32;
+    if percent == 100 {
+        return None;
+    }
+
+    let label = widget::button::text(format!("{percent} %"))
+        .on_press(Message::ToggleUrlBarPopover(UrlBarPopover::Zoom));
+    let anchor = widget::tooltip(
+        label,
+        widget::text("Sidzoom – klicka för att justera"),
+        widget::tooltip::Position::Bottom,
+    );
+
+    let mut popover = widget::popover(anchor)
+        .position(widget::popover::Position::Bottom)
+        .on_close(Message::CloseUrlBarPopover);
+    if open == Some(UrlBarPopover::Zoom) {
+        popover = popover.popup(zoom_popup(percent));
+    }
+    Some(popover.into())
+}
+
+/// Popover body with `−  <percent>  +` controls and a reset button.
+fn zoom_popup<'a>(percent: i32) -> Element<'a, Message> {
+    let controls = widget::row::with_capacity(3)
+        .align_y(Alignment::Center)
+        .spacing(8)
+        .push(
+            widget::button::icon(widget::icon::from_name("list-remove-symbolic"))
+                .on_press(Message::ZoomOut),
+        )
+        .push(widget::text(format!("{percent} %")))
+        .push(
+            widget::button::icon(widget::icon::from_name("list-add-symbolic"))
+                .on_press(Message::ZoomIn),
+        );
+
+    let column = widget::column::with_capacity(2)
+        .spacing(8)
+        .align_x(Alignment::Center)
+        .push(controls)
+        .push(widget::button::text("Återställ").on_press(Message::ZoomReset));
+
+    widget::container(column)
+        .padding(12)
         .class(libcosmic::theme::Container::Dialog)
         .into()
 }

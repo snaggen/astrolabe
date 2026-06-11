@@ -1797,6 +1797,7 @@ impl libcosmic::Application for App {
             text: &tab.url_bar_text,
             security: SecurityStatus::from_url(&current_url),
             is_bookmarked: self.bookmarked_urls.contains(&current_url),
+            zoom: tab.servo.page_zoom(),
             open_popover: self.url_bar_popover,
         }
         .view();
