@@ -1764,6 +1764,7 @@ dependencies = [
  "cosmic-webview",
  "dirs",
  "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "image",
  "libcosmic",
  "pollster",
  "reqwest",

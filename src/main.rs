@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod pages;
 mod tabs;
+mod thumbnails;
 mod url_bar;
 
 use cosmic_config::CosmicConfigEntry as _;

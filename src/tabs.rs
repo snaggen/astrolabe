@@ -23,6 +23,9 @@ pub struct TabState {
     /// True while this tab shows the internal New Tab page instead of the
     /// webview. Set when the tab opens as a New Tab and cleared on navigation.
     pub show_new_tab_page: bool,
+    /// URL whose thumbnail this tab has already captured, to avoid recapturing
+    /// the same page on every wake once it has finished loading.
+    pub thumb_captured_url: Option<String>,
 }
 
 impl TabState {
@@ -37,6 +40,7 @@ impl TabState {
                 url_bar_focused: false,
                 logged_url: None,
                 show_new_tab_page: false,
+                thumb_captured_url: None,
             },
             rx,
         )

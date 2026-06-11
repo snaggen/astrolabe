@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 
 use cosmic_webview::{
     ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EditingActionEvent,
@@ -198,6 +199,8 @@ pub enum Message {
     TopSitesLoaded(Vec<HistoryEntry>),
     /// Pinned sites loaded for the New Tab grid.
     PinnedLoaded(Vec<BookmarkEntry>),
+    /// A thumbnail or favicon finished writing; refresh the tile-image map.
+    TileImagesChanged,
     // ── Settings ────────────────────────────────────────────────────────────────
     /// Toggle the settings context drawer.
     SettingsOpen,
@@ -341,6 +344,9 @@ pub struct App {
     top_sites: Vec<HistoryEntry>,
     /// Sites pinned to the New Tab grid.
     pinned_sites: Vec<BookmarkEntry>,
+    /// Best cached image (thumbnail, else favicon) per grid URL. Rebuilt when
+    /// the grid data changes or a thumbnail/favicon finishes writing.
+    tile_images: HashMap<String, PathBuf>,
 }
 
 /// Maps a key press to a browser action, implementing Firefox-compatible
@@ -602,6 +608,128 @@ impl App {
         Task::batch(vec![top, pinned])
     }
 
+    /// Recompute the best cached image for every grid URL: a thumbnail if one
+    /// exists on disk, otherwise a favicon, otherwise nothing (generic icon).
+    fn rebuild_tile_images(&mut self) {
+        let urls = self
+            .pinned_sites
+            .iter()
+            .map(|b| b.url.clone())
+            .chain(self.top_sites.iter().map(|h| h.url.clone()));
+
+        let mut images = HashMap::new();
+        for url in urls {
+            let thumb = crate::thumbnails::thumbnail_path(&url);
+            if thumb.exists() {
+                images.insert(url, thumb);
+                continue;
+            }
+            let favicon = crate::thumbnails::favicon_path(&url);
+            if favicon.exists() {
+                images.insert(url, favicon);
+            }
+        }
+        self.tile_images = images;
+    }
+
+    /// Capture a thumbnail and fetch a favicon for the active tab once its
+    /// current page has finished loading. No-op until the page is complete, for
+    /// non-HTTP(S) URLs, or when this URL was already captured.
+    fn maybe_capture_active_thumbnail(&mut self) -> Task<Message> {
+        use cosmic_webview::LoadStatus;
+
+        let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
+            return Task::none();
+        };
+        if tab.servo.load_status() != LoadStatus::Complete || tab.servo.frame_generation() == 0 {
+            return Task::none();
+        }
+        let Some(url) = tab.servo.current_url() else {
+            return Task::none();
+        };
+        if !matches!(url.scheme(), "http" | "https") {
+            return Task::none();
+        }
+        let url = url.to_string();
+        if tab.thumb_captured_url.as_deref() == Some(&url) {
+            return Task::none();
+        }
+        tab.thumb_captured_url = Some(url.clone());
+
+        let mut tasks = Vec::new();
+
+        // The GPU readback must run on this thread; the downscale + encode are
+        // offloaded to the executor.
+        if let Some(frame) = tab.servo.screenshot() {
+            let url = url.clone();
+            tasks.push(Task::perform(
+                async move { crate::thumbnails::save_thumbnail(&url, &frame) },
+                |result| {
+                    if let Err(e) = &result {
+                        tracing::warn!("Thumbnail save failed: {e}");
+                    }
+                    libcosmic::action::app(Message::TileImagesChanged)
+                },
+            ));
+        }
+
+        // Refresh the favicon only when it is missing or has aged out.
+        let favicon = crate::thumbnails::favicon_path(&url);
+        if crate::thumbnails::is_stale(&favicon, crate::thumbnails::MAX_AGE) {
+            tasks.push(Task::perform(
+                async move { crate::thumbnails::fetch_favicon(url).await },
+                |result| {
+                    if let Err(e) = &result {
+                        tracing::debug!("Favicon fetch failed: {e}");
+                    }
+                    libcosmic::action::app(Message::TileImagesChanged)
+                },
+            ));
+        }
+
+        Task::batch(tasks)
+    }
+
+    /// Proactively fetch favicons for grid sites that have no thumbnail and no
+    /// fresh cached favicon, so the New Tab page shows favicons for sites not
+    /// visited since the cache was built. Deduplicated by origin.
+    fn fetch_missing_favicons(&self) -> Task<Message> {
+        let urls = self
+            .pinned_sites
+            .iter()
+            .map(|b| b.url.clone())
+            .chain(self.top_sites.iter().map(|h| h.url.clone()));
+
+        let mut seen = HashSet::new();
+        let mut tasks = Vec::new();
+        for url in urls {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                continue;
+            }
+            // A thumbnail already wins in `rebuild_tile_images`; skip the fetch.
+            if crate::thumbnails::thumbnail_path(&url).exists() {
+                continue;
+            }
+            let favicon = crate::thumbnails::favicon_path(&url);
+            // One fetch per origin, and only when missing or aged out.
+            if !seen.insert(favicon.clone())
+                || !crate::thumbnails::is_stale(&favicon, crate::thumbnails::MAX_AGE)
+            {
+                continue;
+            }
+            tasks.push(Task::perform(
+                async move { crate::thumbnails::fetch_favicon(url).await },
+                |result| {
+                    if let Err(e) = &result {
+                        tracing::debug!("Favicon fetch failed: {e}");
+                    }
+                    libcosmic::action::app(Message::TileImagesChanged)
+                },
+            ));
+        }
+        Task::batch(tasks)
+    }
+
     /// Write a settings change through `cosmic_config`.
     ///
     /// The closure runs the generated per-field setter, which both persists the
@@ -723,6 +851,7 @@ impl libcosmic::Application for App {
             bookmarked_urls: HashSet::new(),
             top_sites: Vec::new(),
             pinned_sites: Vec::new(),
+            tile_images: HashMap::new(),
         };
 
         let db_task = Task::perform(
@@ -836,6 +965,8 @@ impl libcosmic::Application for App {
                     }
                 }
 
+                let mut tasks = Vec::new();
+
                 // Log URL changes for the active tab. Only fires when the URL
                 // actually changes so repeated wake signals don't spam the DB.
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>()
@@ -847,16 +978,21 @@ impl libcosmic::Application for App {
                     {
                         let title = tab.servo.title().unwrap_or_default();
                         tab.logged_url = Some(url_str.clone());
-                        return Task::perform(
+                        tasks.push(Task::perform(
                             async move {
                                 if let Err(e) = crate::db::log_visit(conn, url_str, title).await {
                                     tracing::warn!("History log failed: {e}");
                                 }
                             },
                             |_| libcosmic::action::app(Message::VisitLogged),
-                        );
+                        ));
                     }
                 }
+
+                // Capture a thumbnail + favicon once the active page is loaded.
+                tasks.push(self.maybe_capture_active_thumbnail());
+
+                return Task::batch(tasks);
             }
 
             Message::Input(event) => {
@@ -1268,10 +1404,18 @@ impl libcosmic::Application for App {
 
             Message::TopSitesLoaded(entries) => {
                 self.top_sites = entries;
+                self.rebuild_tile_images();
+                return self.fetch_missing_favicons();
             }
 
             Message::PinnedLoaded(entries) => {
                 self.pinned_sites = entries;
+                self.rebuild_tile_images();
+                return self.fetch_missing_favicons();
+            }
+
+            Message::TileImagesChanged => {
+                self.rebuild_tile_images();
             }
 
             // ── Settings ──────────────────────────────────────────────────────
@@ -1664,6 +1808,7 @@ impl libcosmic::Application for App {
             widget::container(pages::new_tab::view(
                 &self.top_sites,
                 &self.pinned_sites,
+                &self.tile_images,
                 self.config.new_tab_columns,
                 self.config.new_tab_rows,
             ))

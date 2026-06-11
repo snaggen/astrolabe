@@ -21,6 +21,8 @@ dirs = "6.0.0"
 anyhow = "1.0.102"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 serde_json = "1"
+# Matches the image version cosmic-webview's screenshot() returns (RgbaImage).
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 
 [dev-dependencies]
 pollster = "0.4"
