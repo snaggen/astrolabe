@@ -848,6 +848,8 @@ impl libcosmic::Application for App {
             })
             .unwrap_or_default();
 
+        cosmic_webview::set_profile_dir(crate::db::profile_dir());
+
         let initial_size = PhysicalSize::new(1280u32, 800);
         // A command-line URL overrides the configured startup page.
         let (initial_url, show_new_tab_page) = match flags {
@@ -902,6 +904,15 @@ impl libcosmic::Application for App {
             },
         );
         (app, db_task)
+    }
+
+    fn on_app_exit(&mut self) -> Option<Message> {
+        // Drop all tabs first so every Servo clone is released, then shut down
+        // the shared engine. The final drop triggers ServoInner::Drop which
+        // flushes cookie_jar.json to disk.
+        self.tabs = segmented_button::SingleSelectModel::default();
+        cosmic_webview::shutdown_engine();
+        None
     }
 
     fn subscription(&self) -> Subscription<Message> {

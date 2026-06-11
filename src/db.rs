@@ -23,6 +23,18 @@ pub enum HistorySort {
     MostVisited,
 }
 
+/// Path to the shared profile directory under the XDG data directory.
+///
+/// Creates the directory if it does not exist. Servo uses this path for
+/// `cookie_jar.json`, `hsts_list.json`, and `auth_cache.json`.
+pub fn profile_dir() -> PathBuf {
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("cosmic-web");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Path to the browser database file under the XDG data directory.
 pub fn db_path() -> PathBuf {
     dirs::data_dir()
