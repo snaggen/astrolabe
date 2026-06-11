@@ -94,22 +94,23 @@ impl<'a> AddressBar<'a> {
         // Cookie and security indicators apply only to real web pages, not to
         // internal pages like the New Tab page.
         let is_web_page = self.security != SecurityStatus::Unknown;
+        let cookie = is_web_page.then(|| cookie_indicator(self.cookie_level, self.open_popover));
 
-        let mut row = widget::row::with_capacity(5).align_y(Alignment::Center);
-        if let Some(indicator) = security_indicator(self.security, self.open_popover) {
-            row = row.push(indicator);
-        }
-        if is_web_page {
-            row = row.push(cookie_indicator(self.cookie_level, self.open_popover));
-        }
-        if let Some(indicator) = permission_indicator(self.permissions, self.open_popover) {
-            row = row.push(indicator);
-        }
-        row = row.push(input);
-        if let Some(zoom) = zoom_indicator(self.zoom, self.open_popover) {
-            row = row.push(zoom);
-        }
-        row = row.push(bookmark_button(self.is_bookmarked));
+        // The row keeps a fixed slot layout: absent indicators render as a
+        // zero-size placeholder. This keeps the text input at a constant child
+        // index so iced never reconciles its widget state against a sibling's
+        // (which panics in `TextInput::layout`).
+        let row = widget::row::with_capacity(6)
+            .align_y(Alignment::Center)
+            .push(slot(security_indicator(self.security, self.open_popover)))
+            .push(slot(cookie))
+            .push(slot(permission_indicator(
+                self.permissions,
+                self.open_popover,
+            )))
+            .push(input)
+            .push(slot(zoom_indicator(self.zoom, self.open_popover)))
+            .push(bookmark_button(self.is_bookmarked));
 
         widget::container(row)
             .padding([0, 4])
@@ -117,6 +118,12 @@ impl<'a> AddressBar<'a> {
             .class(libcosmic::theme::Container::Card)
             .into()
     }
+}
+
+/// Wrap an optional indicator in a fixed row slot: the widget when present, or
+/// a zero-size placeholder so the slot still occupies a stable child index.
+fn slot(indicator: Option<Element<'_, Message>>) -> Element<'_, Message> {
+    indicator.unwrap_or_else(|| widget::Space::new().into())
 }
 
 /// The security indicator: a clickable icon with a hover tooltip and a popover
