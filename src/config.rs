@@ -2,10 +2,10 @@ use cosmic_config::CosmicConfigEntry;
 use cosmic_config::cosmic_config_derive::CosmicConfigEntry;
 use serde::{Deserialize, Serialize};
 
-/// Where to navigate when the browser starts or a new tab is opened.
+/// What a tab shows when it opens — used for both startup and new tabs.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum StartupPage {
-    /// Show the built-in New Tab page (about:blank until Fas 7).
+    /// Show the built-in New Tab page.
     #[default]
     NewTab,
     /// Navigate to a fixed URL.
@@ -155,8 +155,11 @@ pub fn extract_search_query(url: &str, engines: &[SearchEngine]) -> Option<Strin
 #[serde(default)]
 #[version = 1]
 pub struct BrowserConfig {
-    /// What to show when opening a new tab or starting the browser.
+    /// What the first tab shows when the browser starts.
     pub startup_page: StartupPage,
+    /// What a newly opened tab shows. Independent of `startup_page` so the New
+    /// Tab page stays reachable even when startup is set to a fixed URL.
+    pub new_tab_page: StartupPage,
     /// Fixed URL used when `startup_page == StartupPage::Url`.
     pub home_url: String,
     /// Search engine used for non-URL input in the address bar.
@@ -167,6 +170,7 @@ impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
             startup_page: StartupPage::default(),
+            new_tab_page: StartupPage::NewTab,
             home_url: String::from("https://start.duckduckgo.com"),
             search_engine: SearchEngine::default(),
         }

@@ -20,6 +20,9 @@ pub struct TabState {
     /// The URL that was last written to the history database for this tab.
     /// Used to avoid logging the same URL twice in a row.
     pub logged_url: Option<String>,
+    /// True while this tab shows the internal New Tab page instead of the
+    /// webview. Set when the tab opens as a New Tab and cleared on navigation.
+    pub show_new_tab_page: bool,
 }
 
 impl TabState {
@@ -33,6 +36,7 @@ impl TabState {
                 url_bar_text,
                 url_bar_focused: false,
                 logged_url: None,
+                show_new_tab_page: false,
             },
             rx,
         )

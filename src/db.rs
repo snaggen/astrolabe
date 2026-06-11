@@ -57,9 +57,10 @@ async fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             last_visited INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS bookmarks (
-            id    INTEGER PRIMARY KEY AUTOINCREMENT,
-            url   TEXT NOT NULL UNIQUE,
-            title TEXT NOT NULL DEFAULT ''
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            url    TEXT NOT NULL UNIQUE,
+            title  TEXT NOT NULL DEFAULT '',
+            folder TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS search_history (
             query         TEXT    NOT NULL PRIMARY KEY,
@@ -68,6 +69,17 @@ async fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         );",
     )
     .await?;
+
+    // Migrate databases created before the `folder` column existed. SQLite has
+    // no `ADD COLUMN IF NOT EXISTS`, so the statement errors with "duplicate
+    // column" on already-migrated databases — that error is expected and ignored.
+    let _ = conn
+        .execute(
+            "ALTER TABLE bookmarks ADD COLUMN folder TEXT NOT NULL DEFAULT ''",
+            (),
+        )
+        .await;
+
     Ok(())
 }
 
@@ -266,6 +278,11 @@ pub async fn query_suggestions(
 
 // ── Bookmarks ─────────────────────────────────────────────────────────────────
 
+/// Reserved `folder` value for sites pinned to the New Tab page. A URL is unique
+/// across the bookmarks table, so a site is either a normal bookmark (`folder =
+/// ""`) or a pinned site (`folder = "pinned"`), never both at once.
+pub const PINNED_FOLDER: &str = "pinned";
+
 /// A bookmark entry as stored in the database.
 #[derive(Clone, Debug)]
 pub struct BookmarkEntry {
@@ -284,6 +301,52 @@ pub async fn add_bookmark(conn: Connection, url: String, title: String) -> anyho
     Ok(())
 }
 
+/// Pin a site to the New Tab page.
+///
+/// Stored as a bookmark in the reserved [`PINNED_FOLDER`]. If the URL already
+/// exists as a normal bookmark it is moved into the pinned folder in place.
+pub async fn add_pinned(conn: Connection, url: String, title: String) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO bookmarks (url, title, folder) VALUES (?1, ?2, ?3)
+         ON CONFLICT(url) DO UPDATE SET
+             folder = ?3,
+             title  = CASE WHEN excluded.title != '' THEN excluded.title
+                           ELSE bookmarks.title END",
+        (url.as_str(), title.as_str(), PINNED_FOLDER),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Unpin a site from the New Tab page. Only removes rows in the pinned folder.
+pub async fn remove_pinned(conn: Connection, url: String) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM bookmarks WHERE url = ?1 AND folder = ?2",
+        (url.as_str(), PINNED_FOLDER),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Query the sites pinned to the New Tab page, ordered by title.
+pub async fn query_pinned(conn: Connection) -> anyhow::Result<Vec<BookmarkEntry>> {
+    let mut rows = conn
+        .query(
+            "SELECT id, url, title FROM bookmarks WHERE folder = ?1 ORDER BY title",
+            (PINNED_FOLDER,),
+        )
+        .await?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().await? {
+        entries.push(BookmarkEntry {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            title: row.get(2)?,
+        });
+    }
+    Ok(entries)
+}
+
 /// Remove a bookmark by URL.
 pub async fn remove_bookmark(conn: Connection, url: String) -> anyhow::Result<()> {
     conn.execute("DELETE FROM bookmarks WHERE url = ?1", (url.as_str(),))
@@ -298,7 +361,10 @@ pub async fn delete_bookmark_entry(conn: Connection, id: i64) -> anyhow::Result<
     Ok(())
 }
 
-/// Query bookmarks filtered by URL or title substring, ordered by title.
+/// Query normal bookmarks filtered by URL or title substring, ordered by title.
+///
+/// Pinned sites (`folder = "pinned"`) are excluded so they do not clutter the
+/// bookmarks drawer; they are shown only on the New Tab page via [`query_pinned`].
 pub async fn query_bookmarks(
     conn: Connection,
     filter: String,
@@ -307,7 +373,7 @@ pub async fn query_bookmarks(
     let mut rows = conn
         .query(
             "SELECT id, url, title FROM bookmarks
-             WHERE url LIKE ?1 OR title LIKE ?1
+             WHERE (url LIKE ?1 OR title LIKE ?1) AND folder = ''
              ORDER BY title",
             (like.as_str(),),
         )
@@ -324,7 +390,114 @@ pub async fn query_bookmarks(
 }
 
 /// Load the set of all bookmarked URLs (used for the star-icon check).
+///
+/// Includes pinned sites: they live in the bookmarks table, so the star
+/// reflects presence there regardless of folder.
 pub async fn load_bookmarked_urls(conn: Connection) -> anyhow::Result<HashSet<String>> {
-    let entries = query_bookmarks(conn, String::new()).await?;
-    Ok(entries.into_iter().map(|e| e.url).collect())
+    let mut rows = conn.query("SELECT url FROM bookmarks", ()).await?;
+    let mut urls = HashSet::new();
+    while let Some(row) = rows.next().await? {
+        urls.insert(row.get::<String>(0)?);
+    }
+    Ok(urls)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Open a fresh on-disk database in a unique temp path.
+    ///
+    /// turso's `Builder::new_local` expects a file path, so each test gets its
+    /// own file that is removed first to guarantee a clean schema.
+    async fn temp_db() -> anyhow::Result<Connection> {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("cosmic-web-test-{}-{n}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        open(path).await
+    }
+
+    #[test]
+    fn pin_round_trip() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            let conn = temp_db().await?;
+            add_pinned(conn.clone(), "https://a.example/".into(), "A".into()).await?;
+
+            let pinned = query_pinned(conn.clone()).await?;
+            assert_eq!(pinned.len(), 1);
+            assert_eq!(pinned[0].url, "https://a.example/");
+
+            remove_pinned(conn.clone(), "https://a.example/".into()).await?;
+            assert!(query_pinned(conn).await?.is_empty());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn pinned_excluded_from_bookmarks_drawer() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            let conn = temp_db().await?;
+            add_bookmark(
+                conn.clone(),
+                "https://normal.example/".into(),
+                "Normal".into(),
+            )
+            .await?;
+            add_pinned(
+                conn.clone(),
+                "https://pinned.example/".into(),
+                "Pinned".into(),
+            )
+            .await?;
+
+            // The drawer lists only normal bookmarks…
+            let drawer = query_bookmarks(conn.clone(), String::new()).await?;
+            assert_eq!(drawer.len(), 1);
+            assert_eq!(drawer[0].url, "https://normal.example/");
+
+            // …while the New Tab page lists only pinned ones…
+            let pinned = query_pinned(conn.clone()).await?;
+            assert_eq!(pinned.len(), 1);
+            assert_eq!(pinned[0].url, "https://pinned.example/");
+
+            // …and the star check sees both (they share the bookmarks table).
+            let urls = load_bookmarked_urls(conn).await?;
+            assert!(urls.contains("https://normal.example/"));
+            assert!(urls.contains("https://pinned.example/"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn pinning_existing_bookmark_moves_it() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            let conn = temp_db().await?;
+            add_bookmark(conn.clone(), "https://x.example/".into(), "X".into()).await?;
+            // Pinning a URL that is already a normal bookmark converts it in place.
+            add_pinned(conn.clone(), "https://x.example/".into(), "X".into()).await?;
+
+            assert!(
+                query_bookmarks(conn.clone(), String::new())
+                    .await?
+                    .is_empty()
+            );
+            assert_eq!(query_pinned(conn).await?.len(), 1);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn schema_migration_is_idempotent() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            // open() already ran init_schema once; running it again must not fail
+            // even though the `folder` column already exists.
+            let conn = temp_db().await?;
+            init_schema(&conn).await?;
+            init_schema(&conn).await?;
+            Ok(())
+        })
+    }
 }

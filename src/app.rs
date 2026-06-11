@@ -36,6 +36,12 @@ const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.3;
 const ZOOM_MAX: f32 = 5.0;
 
+/// New Tab grid dimensions. Made configurable in Fas 7b; constant for now.
+const NEW_TAB_COLUMNS: u16 = 4;
+const NEW_TAB_ROWS: u16 = 2;
+/// History rows fetched for the grid; trimmed to the visible cell count in `view`.
+const NEW_TAB_TOP_SITES: usize = 24;
+
 // ── Context menu ──────────────────────────────────────────────────────────────
 
 /// Unified action for both static fallback items and Servo-provided items.
@@ -111,6 +117,18 @@ fn build_servo_menu(items: &[ContextMenuItem]) -> Vec<menu::Tree<Message>> {
     menu::items(&HashMap::new(), menu_items)
 }
 
+/// Resolve a configured page to the Servo URL to load and whether the internal
+/// New Tab page should be shown instead of the webview.
+fn resolve_page(page: &StartupPage) -> (Url, bool) {
+    let blank = || Url::parse("about:blank").expect("about:blank is always valid");
+    match page {
+        StartupPage::NewTab => (blank(), true),
+        StartupPage::Url(u) => (Url::parse(u).unwrap_or_else(|_| blank()), false),
+        // SearchEngine has no dedicated landing page yet; show a blank webview.
+        StartupPage::SearchEngine => (blank(), false),
+    }
+}
+
 // ── Context page ─────────────────────────────────────────────────────────────
 
 /// Which page is currently shown in the context drawer.
@@ -168,6 +186,20 @@ pub enum Message {
     TabPrev,
     /// Open a link in a new background tab (middle-click or Ctrl+click).
     OpenLinkInNewTab(String),
+    // ── New Tab page ────────────────────────────────────────────────────────────
+    /// Navigate the active tab to a URL (top-site click on the New Tab page).
+    NavigateTo(String),
+    /// Pin or unpin a site shown on the New Tab page.
+    TogglePinnedSite {
+        url: String,
+        title: String,
+    },
+    /// A pin/unpin write finished; reload the New Tab page data.
+    PinnedChanged,
+    /// Most-visited sites loaded for the New Tab grid.
+    TopSitesLoaded(Vec<HistoryEntry>),
+    /// Pinned sites loaded for the New Tab grid.
+    PinnedLoaded(Vec<BookmarkEntry>),
     // ── Zoom ──────────────────────────────────────────────────────────────────
     /// Increase the active tab's page zoom (Ctrl++).
     ZoomIn,
@@ -291,6 +323,11 @@ pub struct App {
     bookmark_filter: String,
     /// Set of bookmarked URLs for fast star-icon lookup.
     bookmarked_urls: HashSet<String>,
+    // ── New Tab page ──────────────────────────────────────────────────────────
+    /// Most-visited sites shown in the New Tab grid.
+    top_sites: Vec<HistoryEntry>,
+    /// Sites pinned to the New Tab grid.
+    pinned_sites: Vec<BookmarkEntry>,
 }
 
 /// Maps a key press to a browser action, implementing Firefox-compatible
@@ -381,6 +418,7 @@ impl App {
         });
         tab.url_bar_text = url.to_string();
         tab.url_bar_focused = false;
+        tab.show_new_tab_page = false;
         tab.servo.navigate(url);
 
         let focus_task = libcosmic::iced::widget::operation::focus_next();
@@ -421,8 +459,10 @@ impl App {
 
     /// Create a new tab loading `url` and register it in the tab model.
     /// The caller is responsible for activating the returned entity.
-    fn add_tab(&mut self, url: Url) -> segmented_button::Entity {
-        let (tab, _rx) = TabState::new(url, self.current_size, self.scale);
+    /// `show_new_tab_page` makes the tab open on the internal New Tab page.
+    fn add_tab(&mut self, url: Url, show_new_tab_page: bool) -> segmented_button::Entity {
+        let (mut tab, _rx) = TabState::new(url, self.current_size, self.scale);
+        tab.show_new_tab_page = show_new_tab_page;
         self.tabs.insert().closable().text("New Tab").data(tab).id()
     }
 
@@ -473,19 +513,6 @@ impl App {
         }
     }
 
-    /// Return the URL to open in new tabs based on the current config.
-    fn startup_url(&self) -> Url {
-        match &self.config.startup_page {
-            StartupPage::Url(u) => Url::parse(u).unwrap_or_else(|_| {
-                Url::parse("about:blank").expect("about:blank is always valid")
-            }),
-            // SearchEngine and NewTab both show about:blank until Fas 6/7
-            StartupPage::SearchEngine | StartupPage::NewTab => {
-                Url::parse("about:blank").expect("about:blank is always valid")
-            }
-        }
-    }
-
     /// Issue a DB query and send the results back as `BookmarkLoaded`.
     fn reload_bookmarks(&self) -> Task<Message> {
         let Some(conn) = self.db.clone() else {
@@ -521,6 +548,45 @@ impl App {
                 }
             },
         )
+    }
+
+    /// Reload both data sources for the New Tab grid (top sites + pinned).
+    fn reload_new_tab(&self) -> Task<Message> {
+        let Some(conn) = self.db.clone() else {
+            return Task::none();
+        };
+        let top = Task::perform(
+            {
+                let conn = conn.clone();
+                async move {
+                    crate::db::query_history(
+                        conn,
+                        String::new(),
+                        HistorySort::MostVisited,
+                        NEW_TAB_TOP_SITES,
+                    )
+                    .await
+                }
+            },
+            |result| match result {
+                Ok(entries) => libcosmic::action::app(Message::TopSitesLoaded(entries)),
+                Err(e) => {
+                    tracing::warn!("Top sites query failed: {e}");
+                    libcosmic::action::app(Message::TopSitesLoaded(vec![]))
+                }
+            },
+        );
+        let pinned = Task::perform(
+            async move { crate::db::query_pinned(conn).await },
+            |result| match result {
+                Ok(entries) => libcosmic::action::app(Message::PinnedLoaded(entries)),
+                Err(e) => {
+                    tracing::warn!("Pinned query failed: {e}");
+                    libcosmic::action::app(Message::PinnedLoaded(vec![]))
+                }
+            },
+        );
+        Task::batch(vec![top, pinned])
     }
 
     /// Update the window title to match the currently active tab.
@@ -581,16 +647,14 @@ impl libcosmic::Application for App {
             .unwrap_or_default();
 
         let initial_size = PhysicalSize::new(1280u32, 800);
-        let initial_url = flags.unwrap_or_else(|| match &config.startup_page {
-            StartupPage::Url(u) => Url::parse(u).unwrap_or_else(|_| {
-                Url::parse("about:blank").expect("about:blank is always valid")
-            }),
-            StartupPage::SearchEngine | StartupPage::NewTab => {
-                Url::parse("about:blank").expect("about:blank is always valid")
-            }
-        });
+        // A command-line URL overrides the configured startup page.
+        let (initial_url, show_new_tab_page) = match flags {
+            Some(url) => (url, false),
+            None => resolve_page(&config.startup_page),
+        };
 
-        let (first_tab, servo_rx) = TabState::new(initial_url, initial_size, scale);
+        let (mut first_tab, servo_rx) = TabState::new(initial_url, initial_size, scale);
+        first_tab.show_new_tab_page = show_new_tab_page;
 
         let mut tabs = segmented_button::SingleSelectModel::default();
         let first_id = tabs
@@ -621,6 +685,8 @@ impl libcosmic::Application for App {
             bookmarks: Vec::new(),
             bookmark_filter: String::new(),
             bookmarked_urls: HashSet::new(),
+            top_sites: Vec::new(),
+            pinned_sites: Vec::new(),
         };
 
         let db_task = Task::perform(
@@ -1044,6 +1110,7 @@ impl libcosmic::Application for App {
                     && let Some(tab) = self.tabs.active_data_mut::<TabState>()
                 {
                     tab.url_bar_text = url_str;
+                    tab.show_new_tab_page = false;
                     tab.servo.navigate(url);
                 }
                 self.suggestions.clear();
@@ -1096,8 +1163,8 @@ impl libcosmic::Application for App {
             }
 
             Message::TabNew => {
-                let url = self.startup_url();
-                let id = self.add_tab(url);
+                let (url, show_new_tab_page) = resolve_page(&self.config.new_tab_page);
+                let id = self.add_tab(url, show_new_tab_page);
                 self.tabs.activate(id);
                 self.sync_tab_visibility();
                 self.dismiss_context_menu();
@@ -1105,7 +1172,10 @@ impl libcosmic::Application for App {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
                     tab.url_bar_focused = true;
                 }
-                return widget::text_input::focus(URL_BAR_ID.clone());
+                return Task::batch(vec![
+                    widget::text_input::focus(URL_BAR_ID.clone()),
+                    self.reload_new_tab(),
+                ]);
             }
 
             Message::TabCloseActive => {
@@ -1120,11 +1190,53 @@ impl libcosmic::Application for App {
             Message::OpenLinkInNewTab(url) => match Url::parse(&url) {
                 Ok(url) => {
                     // Open in the background, like Firefox — do not switch tabs.
-                    self.add_tab(url);
+                    self.add_tab(url, false);
                     self.sync_tab_visibility();
                 }
                 Err(e) => tracing::warn!("Ignoring middle-click link {url:?}: {e}"),
             },
+
+            // ── New Tab page ──────────────────────────────────────────────────
+            Message::NavigateTo(url) => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Ok(parsed) = Url::parse(&url)
+                {
+                    tab.url_bar_text = url;
+                    tab.show_new_tab_page = false;
+                    tab.servo.navigate(parsed);
+                }
+            }
+
+            Message::TogglePinnedSite { url, title } => {
+                if let Some(conn) = self.db.clone() {
+                    let is_pinned = self.pinned_sites.iter().any(|b| b.url == url);
+                    return Task::perform(
+                        async move {
+                            if is_pinned {
+                                crate::db::remove_pinned(conn, url).await
+                            } else {
+                                crate::db::add_pinned(conn, url, title).await
+                            }
+                        },
+                        |result| {
+                            if let Err(e) = &result {
+                                tracing::warn!("Toggle pinned site failed: {e}");
+                            }
+                            libcosmic::action::app(Message::PinnedChanged)
+                        },
+                    );
+                }
+            }
+
+            Message::PinnedChanged => return self.reload_new_tab(),
+
+            Message::TopSitesLoaded(entries) => {
+                self.top_sites = entries;
+            }
+
+            Message::PinnedLoaded(entries) => {
+                self.pinned_sites = entries;
+            }
 
             // ── Zoom ──────────────────────────────────────────────────────────
             Message::ZoomIn => self.adjust_zoom(ZOOM_STEP),
@@ -1150,7 +1262,7 @@ impl libcosmic::Application for App {
             // ── Database ──────────────────────────────────────────────────────
             Message::DatabaseReady(conn) => {
                 self.db = Some(conn.clone());
-                return Task::perform(
+                let init_bookmarks = Task::perform(
                     async move { crate::db::load_bookmarked_urls(conn).await },
                     |result| match result {
                         Ok(urls) => libcosmic::action::app(Message::BookmarksInitialized(urls)),
@@ -1160,6 +1272,7 @@ impl libcosmic::Application for App {
                         }
                     },
                 );
+                return Task::batch(vec![init_bookmarks, self.reload_new_tab()]);
             }
 
             Message::DatabaseFailed(reason) => {
@@ -1196,6 +1309,7 @@ impl libcosmic::Application for App {
                     && let Ok(parsed) = Url::parse(&url)
                 {
                     tab.url_bar_text = url;
+                    tab.show_new_tab_page = false;
                     tab.servo.navigate(parsed);
                 }
             }
@@ -1321,6 +1435,7 @@ impl libcosmic::Application for App {
                     && let Ok(parsed) = Url::parse(&url)
                 {
                     tab.url_bar_text = url;
+                    tab.show_new_tab_page = false;
                     tab.servo.navigate(parsed);
                 }
             }
@@ -1457,23 +1572,36 @@ impl libcosmic::Application for App {
             .push(url_bar)
             .push(bookmark_btn);
 
-        let menu_items = if self.context_items.is_empty() {
-            build_default_menu(can_back, can_forward)
+        // Show the internal New Tab page instead of the webview when this tab
+        // opened on it and has not navigated yet.
+        let content_area: Element<'_, Message> = if tab.show_new_tab_page {
+            widget::container(pages::new_tab::view(
+                &self.top_sites,
+                &self.pinned_sites,
+                NEW_TAB_COLUMNS,
+                NEW_TAB_ROWS,
+            ))
+            .height(Length::Fill)
+            .into()
         } else {
-            build_servo_menu(&self.context_items)
+            let menu_items = if self.context_items.is_empty() {
+                build_default_menu(can_back, can_forward)
+            } else {
+                build_servo_menu(&self.context_items)
+            };
+
+            let webview = WebViewWidget::new(tab.servo.frame())
+                .scale(self.scale)
+                .cursor(tab.servo.cursor())
+                .hovered_link(tab.servo.hovered_link())
+                .context_menu(menu_items)
+                .on_input(Message::Input)
+                .on_open_link(Message::OpenLinkInNewTab)
+                .on_resize(Message::WebViewResized)
+                .keyboard_enabled(!tab.url_bar_focused);
+
+            widget::container(webview).height(Length::Fill).into()
         };
-
-        let webview = WebViewWidget::new(tab.servo.frame())
-            .scale(self.scale)
-            .cursor(tab.servo.cursor())
-            .hovered_link(tab.servo.hovered_link())
-            .context_menu(menu_items)
-            .on_input(Message::Input)
-            .on_open_link(Message::OpenLinkInNewTab)
-            .on_resize(Message::WebViewResized)
-            .keyboard_enabled(!tab.url_bar_focused);
-
-        let webview_area = widget::container(webview).height(Length::Fill);
 
         // Always keep the popover in the widget tree so the text input's widget
         // ID stays stable and focus is not reset when suggestions appear.
@@ -1499,7 +1627,7 @@ impl libcosmic::Application for App {
 
         widget::column::with_capacity(2)
             .push(nav_area)
-            .push(webview_area)
+            .push(content_area)
             .into()
     }
 }
