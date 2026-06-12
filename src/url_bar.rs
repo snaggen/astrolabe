@@ -239,7 +239,8 @@ fn permission_label(feature: PermissionFeature) -> &'static str {
         PermissionFeature::BackgroundSync => "Background sync",
         PermissionFeature::Bluetooth => "Bluetooth",
         PermissionFeature::PersistentStorage => "Persistent storage",
-        PermissionFeature::ScreenWakeLock => "Screen wake lock",
+        PermissionFeature::ScreenWakeLock(_) => "Screen wake lock",
+        PermissionFeature::Gamepad => "Gamepad",
     }
 }
 
