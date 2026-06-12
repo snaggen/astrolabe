@@ -1899,11 +1899,17 @@ impl libcosmic::Application for App {
         }
         .view();
 
-        let nav_row = widget::row::with_capacity(4)
+        let nav_row = widget::row::with_capacity(5)
+            .align_y(libcosmic::iced::Alignment::Center)
             .push(back)
             .push(forward)
             .push(reload_or_stop)
-            .push(address_bar);
+            .push(address_bar)
+            .push_maybe(is_loading.then(|| {
+                widget::progress_bar::indeterminate_circular()
+                    .size(24.0)
+                    .bar_height(3.0)
+            }));
 
         // Show the internal New Tab page instead of the webview when this tab
         // opened on it and has not navigated yet.
