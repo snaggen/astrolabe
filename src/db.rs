@@ -78,6 +78,11 @@ async fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             query         TEXT    NOT NULL PRIMARY KEY,
             last_searched INTEGER NOT NULL,
             search_count  INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS site_settings (
+            domain              TEXT    NOT NULL PRIMARY KEY,
+            cookie_protection   TEXT    NOT NULL,
+            updated_at          INTEGER NOT NULL
         );",
     )
     .await?;
@@ -412,6 +417,62 @@ pub async fn load_bookmarked_urls(conn: Connection) -> anyhow::Result<HashSet<St
         urls.insert(row.get::<String>(0)?);
     }
     Ok(urls)
+}
+
+// ── Site settings ─────────────────────────────────────────────────────────────
+
+/// Persist a per-domain cookie-protection override.
+pub async fn save_site_setting(
+    conn: Connection,
+    domain: String,
+    level: crate::config::CookieProtectionLevel,
+) -> anyhow::Result<()> {
+    let level_str = match level {
+        crate::config::CookieProtectionLevel::Standard => "Standard",
+        crate::config::CookieProtectionLevel::Strict => "Strict",
+    };
+    conn.execute(
+        "INSERT INTO site_settings (domain, cookie_protection, updated_at)
+         VALUES (?1, ?2, unixepoch())
+         ON CONFLICT(domain) DO UPDATE SET
+             cookie_protection = excluded.cookie_protection,
+             updated_at        = excluded.updated_at",
+        (domain.as_str(), level_str),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove the per-domain cookie-protection override, restoring the global default.
+pub async fn delete_site_setting(conn: Connection, domain: String) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM site_settings WHERE domain = ?1",
+        (domain.as_str(),),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Load the per-domain cookie-protection override, if any.
+pub async fn load_site_setting(
+    conn: Connection,
+    domain: String,
+) -> anyhow::Result<Option<crate::config::CookieProtectionLevel>> {
+    let mut rows = conn
+        .query(
+            "SELECT cookie_protection FROM site_settings WHERE domain = ?1",
+            (domain.as_str(),),
+        )
+        .await?;
+    if let Some(row) = rows.next().await? {
+        let s: String = row.get(0)?;
+        let level = match s.as_str() {
+            "Strict" => crate::config::CookieProtectionLevel::Strict,
+            _ => crate::config::CookieProtectionLevel::Standard,
+        };
+        return Ok(Some(level));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

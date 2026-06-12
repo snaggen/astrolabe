@@ -151,18 +151,14 @@ pub fn extract_search_query(url: &str, engines: &[SearchEngine]) -> Option<Strin
 }
 
 /// Tracker- and cookie-blocking strength.
-///
-/// In Fas 8 this only records the user's choice and drives the URL-bar
-/// indicator; the blocking itself is wired to Servo's network layer in Fas 9.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum CookieProtectionLevel {
-    /// Blocks the common categories (social trackers, cross-site cookies, etc.).
+    /// Blocks common trackers and cross-site cookies (EasyPrivacy + custom lists).
     #[default]
     Standard,
-    /// Blocks more aggressively, which may break some sites.
+    /// Blocks more aggressively (EasyPrivacy + uBlock Origin + custom lists).
+    /// May break some sites.
     Strict,
-    /// User-configured categories.
-    Custom,
 }
 
 impl CookieProtectionLevel {
@@ -171,9 +167,19 @@ impl CookieProtectionLevel {
         match self {
             Self::Standard => "Standard",
             Self::Strict => "Strict",
-            Self::Custom => "Custom",
         }
     }
+}
+
+/// A user-configured filter list (URL and metadata).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FilterListEntry {
+    /// Short label shown in the settings UI.
+    pub label: String,
+    /// HTTPS URL to the filter list (ABP / uBlock format).
+    pub url: String,
+    /// Whether this list is currently active.
+    pub enabled: bool,
 }
 
 /// Persistent browser configuration, stored via `cosmic_config`.
@@ -196,6 +202,8 @@ pub struct BrowserConfig {
     pub new_tab_rows: u16,
     /// Default tracker/cookie protection level for new sites.
     pub cookie_protection: CookieProtectionLevel,
+    /// User-configured external filter lists (ABP / uBlock format).
+    pub custom_filter_lists: Vec<FilterListEntry>,
 }
 
 impl Default for BrowserConfig {
@@ -208,6 +216,7 @@ impl Default for BrowserConfig {
             new_tab_columns: 4,
             new_tab_rows: 2,
             cookie_protection: CookieProtectionLevel::default(),
+            custom_filter_lists: Vec::new(),
         }
     }
 }

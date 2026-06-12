@@ -15,11 +15,10 @@ const NEW_TAB_KINDS: &[&str] = &["New Tab page", "Fixed URL", "Search engine"];
 const COOKIE_LEVELS: &[CookieProtectionLevel] = &[
     CookieProtectionLevel::Standard,
     CookieProtectionLevel::Strict,
-    CookieProtectionLevel::Custom,
 ];
 
-/// Settings drawer content: New Tab grid size and what new tabs open.
-pub fn view(config: &BrowserConfig) -> Element<'_, Message> {
+/// Settings drawer content: New Tab grid size, privacy settings, and filter lists.
+pub fn view<'a>(config: &'a BrowserConfig, filter_list_url: &'a str) -> Element<'a, Message> {
     let columns = number_row(
         "Grid columns",
         COLUMN_CHOICES,
@@ -77,10 +76,57 @@ pub fn view(config: &BrowserConfig) -> Element<'_, Message> {
             Message::SetCookieProtection(COOKIE_LEVELS.get(i).copied().unwrap_or_default())
         }))
         .align_y(Alignment::Center);
+    let cookie_description = match config.cookie_protection {
+        CookieProtectionLevel::Standard => {
+            "Blocks common trackers and cross-site cookies using EasyPrivacy \
+             and your custom filter lists. Recommended for most sites."
+        }
+        CookieProtectionLevel::Strict => {
+            "Blocks more aggressively using EasyPrivacy, uBlock Origin filters, \
+             and your custom filter lists. May break some sites."
+        }
+    };
+
+    // ── Custom filter lists ────────────────────────────────────────────────────
+    let mut filter_section = widget::column::with_capacity(8)
+        .push(widget::text::title4("Custom filter lists"))
+        .spacing(8);
+
+    for (i, entry) in config.custom_filter_lists.iter().enumerate() {
+        let toggle =
+            widget::toggler(entry.enabled).on_toggle(move |_| Message::ToggleCustomFilterList(i));
+        let label = widget::text(entry.label.as_str()).width(Length::Fill);
+        let remove = widget::button::icon(widget::icon::from_name("list-remove-symbolic"))
+            .on_press(Message::RemoveCustomFilterList(i));
+        let row = widget::row::with_capacity(3)
+            .push(toggle)
+            .push(label)
+            .push(remove)
+            .align_y(Alignment::Center)
+            .spacing(8);
+        filter_section = filter_section.push(row);
+    }
+
+    let can_add = !filter_list_url.trim().is_empty();
+    let add_row = widget::row::with_capacity(2)
+        .push(
+            widget::text_input("https://example.com/list.txt", filter_list_url)
+                .on_input(Message::CustomFilterListUrlChanged)
+                .on_submit(|_| Message::AddCustomFilterList(filter_list_url.to_owned()))
+                .width(Length::Fill),
+        )
+        .push(widget::button::text("Add").on_press_maybe(
+            can_add.then(|| Message::AddCustomFilterList(filter_list_url.to_owned())),
+        ))
+        .align_y(Alignment::Center)
+        .spacing(8);
+    filter_section = filter_section.push(add_row);
 
     column
         .push(widget::text::title4("Privacy"))
         .push(cookie_row)
+        .push(widget::text::caption(cookie_description))
+        .push(filter_section)
         .into()
 }
 

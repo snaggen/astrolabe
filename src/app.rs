@@ -19,10 +19,11 @@ use turso::Connection;
 use url::Url;
 
 use crate::config::{
-    BUILTIN_ENGINES, BrowserConfig, CookieProtectionLevel, SearchEngine, StartupPage,
-    extract_search_query,
+    BUILTIN_ENGINES, BrowserConfig, CookieProtectionLevel, FilterListEntry, SearchEngine,
+    StartupPage, extract_search_query,
 };
 use crate::db::{BookmarkEntry, HistoryEntry, HistorySort, Suggestion, SuggestionKind};
+use crate::filter_engine::FilterEngines;
 use crate::pages;
 use crate::tabs::TabState;
 use crate::url_bar::{self, SecurityStatus, UrlBarPopover};
@@ -233,7 +234,8 @@ pub enum Message {
     /// Set the global default cookie-protection level (settings drawer).
     SetCookieProtection(CookieProtectionLevel),
     /// Set the active tab's per-site cookie-protection override (URL-bar popover).
-    SetCookieProtectionOverride(CookieProtectionLevel),
+    /// `None` removes the override, restoring the global default.
+    SetCookieProtectionOverride(Option<CookieProtectionLevel>),
     /// Allow the active tab's pending permission request.
     PermissionAllow,
     /// Deny the active tab's pending permission request.
@@ -282,6 +284,21 @@ pub enum Message {
     },
     /// Initial set of bookmarked URLs loaded when the database opened.
     BookmarksInitialized(HashSet<String>),
+    // ── Filter engine ────────────────────────────────────────────────────────
+    /// Filter engines built from downloaded lists; ready to apply to tabs.
+    FilterEnginesReady(std::sync::Arc<FilterEngines>),
+    /// Filter engine build failed (logged, no blocking until next startup).
+    FilterEnginesFailed(String),
+    /// Per-domain override loaded from DB after a navigation.
+    FilterOverrideLoaded(Option<CookieProtectionLevel>),
+    /// Add a custom filter list URL.
+    AddCustomFilterList(String),
+    /// Remove a custom filter list by index.
+    RemoveCustomFilterList(usize),
+    /// Enable or disable a custom filter list by index.
+    ToggleCustomFilterList(usize),
+    /// Text in the "add custom filter list" input changed.
+    CustomFilterListUrlChanged(String),
     // ── Config ────────────────────────────────────────────────────────────────
     /// Browser configuration was updated externally (e.g. via cosmic-settings).
     ConfigChanged(BrowserConfig),
@@ -367,6 +384,11 @@ pub struct App {
     // ── URL-bar indicators ────────────────────────────────────────────────────
     /// Which URL-bar indicator popover is open, if any.
     url_bar_popover: Option<UrlBarPopover>,
+    // ── Content filtering ────────────────────────────────────────────────────
+    /// Compiled filter engines; None while downloading/building at startup.
+    filter_engines: Option<std::sync::Arc<FilterEngines>>,
+    /// Text being entered for a new custom filter list URL.
+    custom_filter_list_url: String,
 }
 
 /// Maps a key press to a browser action, implementing Firefox-compatible
@@ -452,10 +474,12 @@ impl App {
     /// as an address; everything else is forwarded to the configured search engine.
     /// Returns a Task that moves keyboard focus away from the URL bar to the page.
     fn try_navigate(&mut self) -> Task<Message> {
-        let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
-            return Task::none();
+        // Read URL bar text with a shared reference (released before mut borrow below).
+        let raw = match self.tabs.active_data::<TabState>() {
+            Some(tab) => tab.url_bar_text.trim().to_owned(),
+            None => return Task::none(),
         };
-        let raw = tab.url_bar_text.trim().to_owned();
+
         let explicit_url = if raw.contains("://") {
             Url::parse(&raw).ok()
         } else if raw.contains('.') && !raw.contains(' ') {
@@ -469,31 +493,61 @@ impl App {
             let search = self.config.search_engine.search_url(&raw);
             Url::parse(&search).expect("search engine URL must be valid")
         });
-        tab.url_bar_text = url.to_string();
+        let domain = url.host_str().map(|h| h.to_owned());
+        let url_str = url.to_string();
+
+        // Compute global default filter before the mutable borrow.
+        let global_filter = self
+            .filter_engines
+            .as_ref()
+            .map(|e| e.filter_fn(self.config.cookie_protection));
+
+        let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
+            return Task::none();
+        };
+        tab.url_bar_text = url_str;
         tab.url_bar_focused = false;
         tab.show_new_tab_page = false;
-        // A per-site cookie override only applies to the site it was set on.
+        // Per-site override is cleared until we hear back from the DB lookup.
         tab.cookie_protection_override = None;
         // Granted permissions and any unanswered request belong to the old page.
         tab.granted_permissions.clear();
         tab.pending_permission = None;
+        // Apply the global default filter while we wait for the DB lookup.
+        tab.servo.set_content_filter(global_filter);
         tab.servo.navigate(url);
 
         let focus_task = libcosmic::iced::widget::operation::focus_next();
 
+        let mut tasks = vec![focus_task];
+
         if is_search && let Some(conn) = self.db.clone() {
-            let log_task = Task::perform(
+            let raw2 = raw.clone();
+            tasks.push(Task::perform(
                 async move {
-                    if let Err(e) = crate::db::log_search_query(conn, raw).await {
+                    if let Err(e) = crate::db::log_search_query(conn, raw2).await {
                         tracing::warn!("Search query log failed: {e}");
                     }
                 },
                 |_| libcosmic::action::app(Message::VisitLogged),
-            );
-            return Task::batch(vec![focus_task, log_task]);
+            ));
         }
 
-        focus_task
+        // Look up any saved per-domain override and restore it.
+        if let (Some(domain), Some(conn)) = (domain, self.db.clone()) {
+            tasks.push(Task::perform(
+                async move { crate::db::load_site_setting(conn, domain).await },
+                |result| {
+                    let level = result.unwrap_or_else(|e| {
+                        tracing::warn!("Site setting lookup failed: {e}");
+                        None
+                    });
+                    libcosmic::action::app(Message::FilterOverrideLoaded(level))
+                },
+            ));
+        }
+
+        Task::batch(tasks)
     }
 
     /// Dismiss the active context menu without selecting an item.
@@ -789,6 +843,122 @@ impl App {
         }
     }
 
+    /// Returns the effective cookie-protection level for a tab.
+    fn effective_level(&self, tab: &crate::tabs::TabState) -> CookieProtectionLevel {
+        tab.cookie_protection_override
+            .unwrap_or(self.config.cookie_protection)
+    }
+
+    /// Install the correct content filter on a tab based on its effective level.
+    fn apply_filter_to_tab(&self, tab: &crate::tabs::TabState) {
+        let Some(engines) = &self.filter_engines else {
+            return;
+        };
+        let level = self.effective_level(tab);
+        tab.servo.set_content_filter(Some(engines.filter_fn(level)));
+    }
+
+    /// Start an async task that downloads filter lists and builds the engines.
+    ///
+    /// Custom filter lists from config are included in both Standard and Strict engines.
+    fn build_filter_engines(&self) -> Task<Message> {
+        let custom_lists: Vec<FilterListEntry> = self
+            .config
+            .custom_filter_lists
+            .iter()
+            .filter(|e| e.enabled)
+            .cloned()
+            .collect();
+        Task::perform(
+            async move {
+                let cache_dir = crate::filter_lists::cache_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/cosmic-web-filters"));
+                let mut standard_texts = Vec::new();
+                let mut strict_extra_texts = Vec::new();
+                let mut custom_texts = Vec::new();
+
+                // Download all built-in lists concurrently.
+                let standard_futs: Vec<_> =
+                    crate::filter_lists::STANDARD_LISTS
+                        .iter()
+                        .map(|(id, url)| {
+                            let cache_dir = cache_dir.clone();
+                            async move {
+                                crate::filter_lists::load_or_refresh(id, url, &cache_dir).await
+                            }
+                        })
+                        .collect();
+                let strict_futs: Vec<_> =
+                    crate::filter_lists::STRICT_EXTRA_LISTS
+                        .iter()
+                        .map(|(id, url)| {
+                            let cache_dir = cache_dir.clone();
+                            async move {
+                                crate::filter_lists::load_or_refresh(id, url, &cache_dir).await
+                            }
+                        })
+                        .collect();
+                let custom_futs: Vec<_> =
+                    custom_lists
+                        .iter()
+                        .map(|entry| {
+                            let id = entry.label.replace(' ', "-").to_lowercase();
+                            let url = entry.url.clone();
+                            let cache_dir = cache_dir.clone();
+                            async move {
+                                crate::filter_lists::load_or_refresh(&id, &url, &cache_dir).await
+                            }
+                        })
+                        .collect();
+
+                for fut in standard_futs {
+                    standard_texts.push(fut.await);
+                }
+                for fut in strict_futs {
+                    strict_extra_texts.push(fut.await);
+                }
+                for fut in custom_futs {
+                    custom_texts.push(fut.await);
+                }
+
+                // Build is CPU-intensive; run on a blocking thread to not stall
+                // the async executor. Owned Vecs are moved in; &str slices are
+                // created inside to satisfy the 'static bound.
+                let engines = tokio::task::spawn_blocking(move || {
+                    let standard_refs: Vec<&str> =
+                        standard_texts.iter().map(String::as_str).collect();
+                    let strict_refs: Vec<&str> =
+                        strict_extra_texts.iter().map(String::as_str).collect();
+                    let custom_refs: Vec<&str> = custom_texts.iter().map(String::as_str).collect();
+                    crate::filter_engine::FilterEngines::build(
+                        &standard_refs,
+                        &strict_refs,
+                        &custom_refs,
+                    )
+                })
+                .await;
+                match engines {
+                    Ok(e) => Ok(std::sync::Arc::new(e)),
+                    Err(e) => Err(e.to_string()),
+                }
+            },
+            |result| match result {
+                Ok(engines) => libcosmic::action::app(Message::FilterEnginesReady(engines)),
+                Err(e) => libcosmic::action::app(Message::FilterEnginesFailed(e)),
+            },
+        )
+    }
+
+    /// Apply the active filter to every open tab.
+    fn apply_filter_to_all_tabs(&self) {
+        let ids: Vec<_> = self.tabs.iter().collect();
+        for id in ids {
+            if let Some(tab) = self.tabs.data::<crate::tabs::TabState>(id) {
+                self.apply_filter_to_tab(tab);
+            }
+        }
+    }
+
     /// Update the window title to match the currently active tab.
     fn sync_active_title(&mut self) {
         let title = self
@@ -894,6 +1064,8 @@ impl libcosmic::Application for App {
             pinned_sites: Vec::new(),
             tile_images: HashMap::new(),
             url_bar_popover: None,
+            filter_engines: None,
+            custom_filter_list_url: String::new(),
         };
 
         let db_task = Task::perform(
@@ -903,7 +1075,8 @@ impl libcosmic::Application for App {
                 Err(e) => libcosmic::action::app(Message::DatabaseFailed(e.to_string())),
             },
         );
-        (app, db_task)
+        let filter_task = app.build_filter_engines();
+        (app, Task::batch(vec![db_task, filter_task]))
     }
 
     fn on_app_exit(&mut self) -> Option<Message> {
@@ -1541,12 +1714,42 @@ impl libcosmic::Application for App {
             Message::CloseUrlBarPopover => self.url_bar_popover = None,
             Message::SetCookieProtection(level) => {
                 self.write_config(|c, h| c.set_cookie_protection(h, level));
+                // Rebuild and re-apply filter for all tabs.
+                return self.build_filter_engines();
             }
-            Message::SetCookieProtectionOverride(level) => {
-                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
-                    tab.cookie_protection_override = Some(level);
-                }
+            Message::SetCookieProtectionOverride(override_level) => {
                 self.url_bar_popover = None;
+                let domain = self
+                    .tabs
+                    .active_data::<TabState>()
+                    .and_then(|t| t.servo.current_url())
+                    .and_then(|u| u.host_str().map(|h| h.to_owned()));
+
+                // Effective level: override if set, otherwise global default.
+                let effective = override_level.unwrap_or(self.config.cookie_protection);
+                let filter = self.filter_engines.as_ref().map(|e| e.filter_fn(effective));
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.cookie_protection_override = override_level;
+                    tab.servo.set_content_filter(filter);
+                }
+
+                // Persist to DB: save if override is set, delete if reset.
+                if let (Some(domain), Some(conn)) = (domain, self.db.clone()) {
+                    return Task::perform(
+                        async move {
+                            let result = match override_level {
+                                Some(level) => {
+                                    crate::db::save_site_setting(conn, domain, level).await
+                                }
+                                None => crate::db::delete_site_setting(conn, domain).await,
+                            };
+                            if let Err(e) = result {
+                                tracing::warn!("Failed to update site setting: {e}");
+                            }
+                        },
+                        |_| libcosmic::action::app(Message::VisitLogged),
+                    );
+                }
             }
             Message::PermissionAllow => {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>()
@@ -1580,6 +1783,71 @@ impl libcosmic::Application for App {
                 self.url_bar_popover = None;
             }
 
+            // ── Filter engine ─────────────────────────────────────────────────
+            Message::FilterEnginesReady(engines) => {
+                self.filter_engines = Some(engines);
+                self.apply_filter_to_all_tabs();
+            }
+            Message::FilterEnginesFailed(reason) => {
+                tracing::warn!("Content filter engine build failed: {reason}");
+            }
+            Message::FilterOverrideLoaded(level) => {
+                let effective = level.unwrap_or(self.config.cookie_protection);
+                let filter = self.filter_engines.as_ref().map(|e| e.filter_fn(effective));
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.cookie_protection_override = level;
+                    if let Some(f) = filter {
+                        tab.servo.set_content_filter(Some(f));
+                    }
+                }
+            }
+            Message::CustomFilterListUrlChanged(url) => {
+                self.custom_filter_list_url = url;
+            }
+            Message::AddCustomFilterList(url) => {
+                let url = url.trim().to_owned();
+                if url.is_empty() {
+                    return Task::none();
+                }
+                let label = url
+                    .split('/')
+                    .next_back()
+                    .unwrap_or("custom")
+                    .trim_end_matches(".txt")
+                    .to_owned();
+                let entry = FilterListEntry {
+                    label,
+                    url,
+                    enabled: true,
+                };
+                self.custom_filter_list_url.clear();
+                self.write_config(|c, h| {
+                    let mut new_lists = c.custom_filter_lists.clone();
+                    new_lists.push(entry);
+                    c.set_custom_filter_lists(h, new_lists)
+                });
+                return self.build_filter_engines();
+            }
+            Message::RemoveCustomFilterList(index) => {
+                self.write_config(|c, h| {
+                    let mut new_lists = c.custom_filter_lists.clone();
+                    if index < new_lists.len() {
+                        new_lists.remove(index);
+                    }
+                    c.set_custom_filter_lists(h, new_lists)
+                });
+                return self.build_filter_engines();
+            }
+            Message::ToggleCustomFilterList(index) => {
+                self.write_config(|c, h| {
+                    let mut new_lists = c.custom_filter_lists.clone();
+                    if let Some(entry) = new_lists.get_mut(index) {
+                        entry.enabled = !entry.enabled;
+                    }
+                    c.set_custom_filter_lists(h, new_lists)
+                });
+                return self.build_filter_engines();
+            }
             // ── Config ────────────────────────────────────────────────────────
             Message::ConfigChanged(config) => {
                 self.config = config;
@@ -1809,7 +2077,7 @@ impl libcosmic::Application for App {
             )
             .title("Bookmarks"),
             ContextPage::Settings => context_drawer::context_drawer(
-                pages::settings::view(&self.config),
+                pages::settings::view(&self.config, &self.custom_filter_list_url),
                 Message::SettingsClose,
             )
             .title("Settings"),
@@ -1889,9 +2157,8 @@ impl libcosmic::Application for App {
         let address_bar = url_bar::AddressBar {
             text: &tab.url_bar_text,
             security: SecurityStatus::from_url(&current_url),
-            cookie_level: tab
-                .cookie_protection_override
-                .unwrap_or(self.config.cookie_protection),
+            cookie_override: tab.cookie_protection_override,
+            global_cookie_level: self.config.cookie_protection,
             permissions: &tab.granted_permissions,
             is_bookmarked: self.bookmarked_urls.contains(&current_url),
             zoom: tab.servo.page_zoom(),

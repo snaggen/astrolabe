@@ -64,9 +64,11 @@ pub struct AddressBar<'a> {
     pub text: &'a str,
     /// Connection security of the active page.
     pub security: SecurityStatus,
-    /// Effective cookie-protection level for the active site (override, else
-    /// the global default).
-    pub cookie_level: CookieProtectionLevel,
+    /// Per-site cookie-protection override for the active tab, if any.
+    /// `None` means the global default applies.
+    pub cookie_override: Option<CookieProtectionLevel>,
+    /// The browser-wide default protection level (from settings).
+    pub global_cookie_level: CookieProtectionLevel,
     /// Permissions the user has granted for the active page; the indicator is
     /// hidden when empty.
     pub permissions: &'a [PermissionFeature],
@@ -94,7 +96,13 @@ impl<'a> AddressBar<'a> {
         // Cookie and security indicators apply only to real web pages, not to
         // internal pages like the New Tab page.
         let is_web_page = self.security != SecurityStatus::Unknown;
-        let cookie = is_web_page.then(|| cookie_indicator(self.cookie_level, self.open_popover));
+        let cookie = is_web_page.then(|| {
+            cookie_indicator(
+                self.cookie_override,
+                self.global_cookie_level,
+                self.open_popover,
+            )
+        });
 
         // The row keeps a fixed slot layout: absent indicators render as a
         // zero-size placeholder. This keeps the text input at a constant child
@@ -172,52 +180,94 @@ fn security_popup<'a>(security: SecurityStatus) -> Element<'a, Message> {
 /// The cookie/tracking-protection indicator: a clickable shield icon with a
 /// hover tooltip and a popover for choosing the per-site level.
 fn cookie_indicator<'a>(
-    level: CookieProtectionLevel,
+    cookie_override: Option<CookieProtectionLevel>,
+    global: CookieProtectionLevel,
     open: Option<UrlBarPopover>,
 ) -> Element<'a, Message> {
-    let button = widget::button::icon(widget::icon::from_name("security-medium-symbolic"))
+    let effective = cookie_override.unwrap_or(global);
+    let tip = if cookie_override.is_some() {
+        format!("Tracking protection: {} (site override)", effective.name())
+    } else {
+        format!("Tracking protection: {}", effective.name())
+    };
+
+    let icon_name = match effective {
+        CookieProtectionLevel::Standard => "security-medium-symbolic",
+        CookieProtectionLevel::Strict => "security-high-symbolic",
+    };
+    let button = widget::button::icon(widget::icon::from_name(icon_name))
         .on_press(Message::ToggleUrlBarPopover(UrlBarPopover::Cookie));
-    let anchor = widget::tooltip(
-        button,
-        widget::text(format!("Tracking protection: {}", level.name())),
-        widget::tooltip::Position::Bottom,
-    );
+    let anchor = widget::tooltip(button, widget::text(tip), widget::tooltip::Position::Bottom);
 
     let mut popover = widget::popover(anchor)
         .position(widget::popover::Position::Bottom)
         .on_close(Message::CloseUrlBarPopover);
     if open == Some(UrlBarPopover::Cookie) {
-        popover = popover.popup(cookie_popup(level));
+        popover = popover.popup(cookie_popup(cookie_override, global));
     }
     popover.into()
 }
 
-/// Popover body: the current level and the three selectable options.
-///
-/// Selecting an option sets a per-site override. The choice takes effect once
-/// Fas 9 wires blocking into Servo's network layer.
-fn cookie_popup<'a>(level: CookieProtectionLevel) -> Element<'a, Message> {
-    let mut column = widget::column::with_capacity(4)
-        .spacing(8)
-        .width(Length::Fixed(240.0))
-        .push(widget::text::body("Tracking protection for this site"));
+/// Dropdown choices for the per-site override: index 0 = use global default,
+/// indices 1–2 map to Standard / Strict.
+const OVERRIDE_OPTIONS: &[Option<CookieProtectionLevel>] = &[
+    None,
+    Some(CookieProtectionLevel::Standard),
+    Some(CookieProtectionLevel::Strict),
+];
 
-    for option in [
-        CookieProtectionLevel::Standard,
-        CookieProtectionLevel::Strict,
-        CookieProtectionLevel::Custom,
-    ] {
-        let button = if option == level {
-            widget::button::suggested(option.name())
-        } else {
-            widget::button::standard(option.name())
-        };
-        column = column.push(
-            button
-                .on_press(Message::SetCookieProtectionOverride(option))
-                .width(Length::Fill),
-        );
+fn override_option_label(
+    opt: Option<CookieProtectionLevel>,
+    global: CookieProtectionLevel,
+) -> String {
+    match opt {
+        None => format!("Default ({})", global.name()),
+        Some(level) => level.name().to_owned(),
     }
+}
+
+fn override_option_description(
+    opt: Option<CookieProtectionLevel>,
+    global: CookieProtectionLevel,
+) -> &'static str {
+    match opt.unwrap_or(global) {
+        CookieProtectionLevel::Standard => {
+            "Blocks common trackers and cross-site cookies using EasyPrivacy \
+             and your custom filter lists. Recommended for most sites."
+        }
+        CookieProtectionLevel::Strict => {
+            "Blocks more aggressively using EasyPrivacy, uBlock Origin filters, \
+             and your custom filter lists. May break some sites."
+        }
+    }
+}
+
+/// Popover body: dropdown to pick the per-site protection level, with a short
+/// description of what the selected level does. Choosing "Default" removes any
+/// site-specific override and falls back to the browser-wide setting.
+fn cookie_popup<'a>(
+    cookie_override: Option<CookieProtectionLevel>,
+    global: CookieProtectionLevel,
+) -> Element<'a, Message> {
+    let labels: Vec<String> = OVERRIDE_OPTIONS
+        .iter()
+        .map(|&opt| override_option_label(opt, global))
+        .collect();
+    let selected = OVERRIDE_OPTIONS.iter().position(|&o| o == cookie_override);
+
+    let dropdown = widget::dropdown(labels, selected, |i| {
+        let level = OVERRIDE_OPTIONS.get(i).copied().flatten();
+        Message::SetCookieProtectionOverride(level)
+    });
+
+    let description = override_option_description(cookie_override, global);
+
+    let column = widget::column::with_capacity(3)
+        .spacing(10)
+        .width(Length::Fixed(280.0))
+        .push(widget::text::body("Tracking protection for this site"))
+        .push(dropdown)
+        .push(widget::text::caption(description));
 
     widget::container(column)
         .padding(12)

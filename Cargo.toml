@@ -20,6 +20,11 @@ turso = { version = "0.6.1", default-features = false }
 dirs = "6.0.0"
 anyhow = "1.0.102"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+tokio = { version = "1", features = ["fs", "rt"] }
+# AdBlock Plus / uBlock Origin filter list engine (Brave's Rust implementation).
+# embedded-domain-resolver is required; mimalloc excluded to avoid conflicting
+# with Servo's global allocator.
+adblock = { version = "0.12", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
 serde_json = "1"
 # Matches the image version cosmic-webview's screenshot() returns (RgbaImage).
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
