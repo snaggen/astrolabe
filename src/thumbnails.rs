@@ -13,6 +13,26 @@ use image::RgbaImage;
 /// Cached tile images refresh after this age (30 days).
 pub const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// Cached image paths for a single New Tab grid site.
+///
+/// A site can have a page thumbnail, a favicon, or both. The grid uses the
+/// thumbnail as the tile background and overlays the favicon to identify the
+/// site; either may be absent.
+#[derive(Clone, Default)]
+pub struct TileImage {
+    /// Page thumbnail captured from the rendered page, if present on disk.
+    pub thumbnail: Option<PathBuf>,
+    /// Site favicon, if present on disk.
+    pub favicon: Option<PathBuf>,
+}
+
+impl TileImage {
+    /// True when neither a thumbnail nor a favicon is available.
+    pub fn is_empty(&self) -> bool {
+        self.thumbnail.is_none() && self.favicon.is_none()
+    }
+}
+
 /// Thumbnail dimensions in pixels — a 16:10 tile.
 const THUMB_W: u32 = 256;
 const THUMB_H: u32 = 160;

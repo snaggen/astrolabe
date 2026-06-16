@@ -3,6 +3,17 @@ use cosmic_webview::{BluetoothDeviceSelectionRequest, PermissionRequest, ServoSt
 use dpi::PhysicalSize;
 use url::Url;
 
+/// What a tab displays. Most tabs render a web page; a `Settings` tab renders
+/// the in-app settings page instead of its (unused) webview.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TabKind {
+    /// A normal web page (or the internal New Tab page).
+    #[default]
+    Web,
+    /// The in-app settings page.
+    Settings,
+}
+
 /// State owned by a single browser tab.
 ///
 /// The URL bar belongs here (not at the window level) so each tab
@@ -13,6 +24,8 @@ use url::Url;
 /// directly and `view()` passes `servo.frame()` to the webview widget.
 pub struct TabState {
     pub servo: ServoState,
+    /// What this tab displays — a web page or an in-app page.
+    pub kind: TabKind,
     /// Current text in this tab's URL bar.
     pub url_bar_text: String,
     /// True while this tab's URL bar has keyboard focus.
@@ -48,6 +61,7 @@ impl TabState {
         (
             Self {
                 servo,
+                kind: TabKind::Web,
                 url_bar_text,
                 url_bar_focused: false,
                 logged_url: None,

@@ -408,11 +408,12 @@ pub async fn remove_pinned(conn: Connection, url: String) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Query the sites pinned to the New Tab page, ordered by title.
+/// Query the sites pinned to the New Tab page, in the order they were pinned
+/// (newest last). `id` is the autoincrement insertion order.
 pub async fn query_pinned(conn: Connection) -> anyhow::Result<Vec<BookmarkEntry>> {
     let mut rows = conn
         .query(
-            "SELECT id, url, title FROM bookmarks WHERE folder = ?1 ORDER BY title",
+            "SELECT id, url, title FROM bookmarks WHERE folder = ?1 ORDER BY id",
             (PINNED_FOLDER,),
         )
         .await?;

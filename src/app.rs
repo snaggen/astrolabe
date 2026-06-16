@@ -27,7 +27,7 @@ use crate::db::{
 };
 use crate::filter_engine::FilterEngines;
 use crate::pages;
-use crate::tabs::TabState;
+use crate::tabs::{TabKind, TabState};
 use crate::url_bar::{self, SecurityStatus, UrlBarPopover};
 use cosmic_config::CosmicConfigEntry as _;
 
@@ -97,6 +97,14 @@ fn current_domain(tab: &crate::tabs::TabState) -> Option<String> {
     tab.servo
         .current_url()
         .and_then(|u| u.host_str().map(str::to_owned))
+}
+
+/// Whether a URL belongs in the history database.
+///
+/// Only real web pages are logged: `about:`, `data:`, `blob:`, and Servo's
+/// internal error pages are excluded so they never appear in history.
+fn is_loggable_url(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
 }
 
 /// The user's answer to a permission prompt.
@@ -197,6 +205,68 @@ fn build_servo_menu(items: &[ContextMenuItem]) -> Vec<menu::Tree<Message>> {
     menu::items(&HashMap::new(), menu_items)
 }
 
+// ── Toolbar overflow menu ─────────────────────────────────────────────────────
+
+/// Actions in the toolbar "hamburger" menu. Each maps to the same message the
+/// old header buttons emitted, so the bookmarks/history/settings flows are
+/// unchanged — only their entry point moved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppMenuAction {
+    Bookmarks,
+    History,
+    Settings,
+}
+
+impl MenuAction for AppMenuAction {
+    type Message = Message;
+    fn message(&self) -> Message {
+        match self {
+            AppMenuAction::Bookmarks => Message::BookmarkOpen,
+            AppMenuAction::History => Message::HistoryOpen,
+            AppMenuAction::Settings => Message::SettingsOpen,
+        }
+    }
+}
+
+/// Build the toolbar overflow ("hamburger") menu: bookmarks, history, settings.
+fn build_app_menu<'a>() -> Element<'a, Message> {
+    let root = widget::button::custom(widget::icon::from_name("open-menu-symbolic").icon())
+        .padding([4, 8])
+        .class(libcosmic::theme::Button::MenuRoot);
+
+    let icon = |name| Some(widget::icon::from_name(name).into());
+    let items = menu::items(
+        &HashMap::new(),
+        vec![
+            menu::Item::Button(
+                "Bookmarks",
+                icon("user-bookmarks-symbolic"),
+                AppMenuAction::Bookmarks,
+            ),
+            menu::Item::Button(
+                "History",
+                icon("document-open-recent-symbolic"),
+                AppMenuAction::History,
+            ),
+            menu::Item::Divider,
+            menu::Item::Button(
+                "Settings",
+                icon("emblem-system-symbolic"),
+                AppMenuAction::Settings,
+            ),
+        ],
+    );
+
+    menu::bar(vec![menu::Tree::with_children(
+        libcosmic::widget::RcElementWrapper::new(Element::from(root)),
+        items,
+    )])
+    .item_height(menu::ItemHeight::Dynamic(40))
+    .item_width(menu::ItemWidth::Uniform(200))
+    .spacing(4.0)
+    .into()
+}
+
 /// Resolve a configured page to the Servo URL to load and whether the internal
 /// New Tab page should be shown instead of the webview.
 fn resolve_page(page: &StartupPage) -> (Url, bool) {
@@ -217,7 +287,8 @@ enum ContextPage {
     #[default]
     History,
     Bookmarks,
-    Settings,
+    /// New Tab page settings (grid size, what new tabs open).
+    NewTabSettings,
 }
 
 // ── Application messages ──────────────────────────────────────────────────────
@@ -283,11 +354,23 @@ pub enum Message {
     PinnedLoaded(Vec<BookmarkEntry>),
     /// A thumbnail or favicon finished writing; refresh the tile-image map.
     TileImagesChanged,
+    /// Pointer entered a New Tab grid cell; reveals its pin button.
+    TileHovered(String),
+    /// Pointer left the hovered New Tab grid cell.
+    TileUnhovered,
     // ── Settings ────────────────────────────────────────────────────────────────
-    /// Toggle the settings context drawer.
+    /// Open the settings tab (focusing the existing one if already open).
     SettingsOpen,
-    /// Settings context drawer closed via its X button.
-    SettingsClose,
+    /// Select a settings section in the side navigation.
+    SettingsSectionSelected(segmented_button::Entity),
+    /// Set what the first tab shows at startup, by dropdown index.
+    SetStartupPageKind(usize),
+    /// Set the fixed URL opened at startup when the "Fixed URL" kind is selected.
+    SetStartupUrl(String),
+    /// Set the default search engine.
+    SetSearchEngine(SearchEngine),
+    /// Set the custom search engine URL template (must contain `{query}`).
+    SetCustomSearchUrl(String),
     /// Set the New Tab grid column count.
     SetNewTabColumns(u16),
     /// Set the New Tab grid row count.
@@ -296,6 +379,10 @@ pub enum Message {
     SetNewTabPageKind(usize),
     /// Set the fixed URL new tabs open when the "Fixed URL" kind is selected.
     SetNewTabUrl(String),
+    /// Open the New Tab settings context drawer (grid size, what new tabs open).
+    OpenNewTabSettings,
+    /// Close the New Tab settings context drawer.
+    CloseNewTabSettings,
     // ── Zoom ──────────────────────────────────────────────────────────────────
     /// Increase the active tab's page zoom (Ctrl++).
     ZoomIn,
@@ -473,6 +560,9 @@ pub struct App {
     config_handle: Option<cosmic_config::Config>,
     /// Which page is currently shown in the context drawer.
     context_page: ContextPage,
+    /// Side navigation for the settings page; its active entry selects which
+    /// section the settings tab shows.
+    settings_nav: segmented_button::SingleSelectModel,
     // ── Awesomebar ────────────────────────────────────────────────────────────
     /// Current suggestion list shown below the URL bar, empty when hidden.
     suggestions: Vec<Suggestion>,
@@ -501,9 +591,12 @@ pub struct App {
     top_sites: Vec<HistoryEntry>,
     /// Sites pinned to the New Tab grid.
     pinned_sites: Vec<BookmarkEntry>,
-    /// Best cached image (thumbnail, else favicon) per grid URL. Rebuilt when
-    /// the grid data changes or a thumbnail/favicon finishes writing.
-    tile_images: HashMap<String, PathBuf>,
+    /// Cached thumbnail and favicon paths per grid URL. Rebuilt when the grid
+    /// data changes or a thumbnail/favicon finishes writing.
+    tile_images: HashMap<String, crate::thumbnails::TileImage>,
+    /// URL of the New Tab grid cell under the pointer, which reveals its pin
+    /// button. `None` when no cell is hovered.
+    hovered_tile: Option<String>,
     // ── URL-bar indicators ────────────────────────────────────────────────────
     /// Which URL-bar indicator popover is open, if any.
     url_bar_popover: Option<UrlBarPopover>,
@@ -729,6 +822,33 @@ impl App {
         let (mut tab, _rx) = TabState::new(url, self.current_size, self.scale);
         tab.show_new_tab_page = show_new_tab_page;
         self.tabs.insert().closable().text("New Tab").data(tab).id()
+    }
+
+    /// Open the settings page in a tab, focusing the existing one if present.
+    ///
+    /// Settings live in a tab (not a drawer) so they get the full window, like
+    /// cosmic-settings. The tab still owns an unused webview — `TabState` always
+    /// creates one — but renders the settings page instead (see `view`).
+    fn open_settings_tab(&mut self) {
+        let existing = self
+            .tabs
+            .iter()
+            .find(|&id| self.tabs.data::<TabState>(id).map(|t| t.kind) == Some(TabKind::Settings));
+
+        let id = existing.unwrap_or_else(|| {
+            let blank = Url::parse("about:blank").expect("about:blank is always valid");
+            let (mut tab, _rx) = TabState::new(blank, self.current_size, self.scale);
+            tab.kind = TabKind::Settings;
+            self.tabs
+                .insert()
+                .closable()
+                .text("Settings")
+                .icon(widget::icon::from_name("emblem-system-symbolic").icon())
+                .data(tab)
+                .id()
+        });
+        self.tabs.activate(id);
+        self.sync_tab_visibility();
     }
 
     /// Close `id`, activating a neighbor first. Does nothing if it is the last tab.
@@ -1057,6 +1177,8 @@ impl App {
     /// Recompute the best cached image for every grid URL: a thumbnail if one
     /// exists on disk, otherwise a favicon, otherwise nothing (generic icon).
     fn rebuild_tile_images(&mut self) {
+        use crate::thumbnails::{TileImage, favicon_path, thumbnail_path};
+
         let urls = self
             .pinned_sites
             .iter()
@@ -1065,14 +1187,13 @@ impl App {
 
         let mut images = HashMap::new();
         for url in urls {
-            let thumb = crate::thumbnails::thumbnail_path(&url);
-            if thumb.exists() {
-                images.insert(url, thumb);
-                continue;
-            }
-            let favicon = crate::thumbnails::favicon_path(&url);
-            if favicon.exists() {
-                images.insert(url, favicon);
+            let exists = |p: PathBuf| p.exists().then_some(p);
+            let tile = TileImage {
+                thumbnail: exists(thumbnail_path(&url)),
+                favicon: exists(favicon_path(&url)),
+            };
+            if !tile.is_empty() {
+                images.insert(url, tile);
             }
         }
         self.tile_images = images;
@@ -1420,11 +1541,22 @@ impl libcosmic::Application for App {
             .id();
         tabs.activate(first_id);
 
+        // Build the settings side navigation, one entry per section.
+        let mut settings_nav = segmented_button::SingleSelectModel::default();
+        for &section in pages::settings::SettingsSection::ALL {
+            settings_nav.insert().text(section.label()).data(section);
+        }
+        let first_section = settings_nav.iter().next();
+        if let Some(first) = first_section {
+            settings_nav.activate(first);
+        }
+
         let app = App {
             core,
             config,
             config_handle,
             context_page: ContextPage::default(),
+            settings_nav,
             suggestions: Vec::new(),
             suggestion_index: None,
             suggestion_query: String::new(),
@@ -1444,6 +1576,7 @@ impl libcosmic::Application for App {
             top_sites: Vec::new(),
             pinned_sites: Vec::new(),
             tile_images: HashMap::new(),
+            hovered_tile: None,
             url_bar_popover: None,
             filter_engines: None,
             custom_filter_list_url: String::new(),
@@ -1603,10 +1736,14 @@ impl libcosmic::Application for App {
 
                 let mut tasks = Vec::new();
 
-                // Log URL changes for the active tab. Only fires when the URL
-                // actually changes so repeated wake signals don't spam the DB.
+                // Log the active tab's page once it has finished loading. Gating
+                // on Complete (not mid-load) and on real http(s) URLs keeps
+                // about: pages and partially-loaded pages out of history. Only
+                // fires when the URL changes so repeated wakes don't spam the DB.
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && tab.servo.load_status() == cosmic_webview::LoadStatus::Complete
                     && let Some(url) = tab.servo.current_url()
+                    && is_loggable_url(&url)
                 {
                     let url_str = url.to_string();
                     if tab.logged_url.as_deref() != Some(&url_str)
@@ -2054,19 +2191,42 @@ impl libcosmic::Application for App {
                 self.rebuild_tile_images();
             }
 
+            Message::TileHovered(url) => self.hovered_tile = Some(url),
+            Message::TileUnhovered => self.hovered_tile = None,
+
             // ── Settings ──────────────────────────────────────────────────────
             Message::SettingsOpen => {
-                if self.core().window.show_context && self.context_page == ContextPage::Settings {
-                    self.core_mut().set_show_context(false);
-                } else {
-                    self.refresh_site_data_domains();
-                    self.context_page = ContextPage::Settings;
-                    self.core_mut().set_show_context(true);
-                }
+                self.refresh_site_data_domains();
+                self.open_settings_tab();
             }
 
-            Message::SettingsClose => {
-                self.core_mut().set_show_context(false);
+            Message::SettingsSectionSelected(entity) => {
+                self.settings_nav.activate(entity);
+            }
+
+            Message::SetStartupPageKind(index) => {
+                let page = match index {
+                    // Preserve any existing URL when re-selecting "Fixed URL".
+                    1 => StartupPage::Url(match &self.config.startup_page {
+                        StartupPage::Url(u) => u.clone(),
+                        _ => String::from("https://"),
+                    }),
+                    2 => StartupPage::SearchEngine,
+                    _ => StartupPage::NewTab,
+                };
+                self.write_config(|c, h| c.set_startup_page(h, page));
+            }
+
+            Message::SetStartupUrl(url) => {
+                self.write_config(|c, h| c.set_startup_page(h, StartupPage::Url(url)));
+            }
+
+            Message::SetSearchEngine(engine) => {
+                self.write_config(|c, h| c.set_search_engine(h, engine));
+            }
+
+            Message::SetCustomSearchUrl(url) => {
+                self.write_config(|c, h| c.set_search_engine(h, SearchEngine::Custom(url)));
             }
 
             Message::SetNewTabColumns(n) => {
@@ -2092,6 +2252,13 @@ impl libcosmic::Application for App {
 
             Message::SetNewTabUrl(url) => {
                 self.write_config(|c, h| c.set_new_tab_page(h, StartupPage::Url(url)));
+            }
+            Message::OpenNewTabSettings => {
+                self.context_page = ContextPage::NewTabSettings;
+                self.core_mut().set_show_context(true);
+            }
+            Message::CloseNewTabSettings => {
+                self.core_mut().set_show_context(false);
             }
 
             // ── Zoom ──────────────────────────────────────────────────────────
@@ -2613,42 +2780,18 @@ impl libcosmic::Application for App {
                 Message::BookmarkClose,
             )
             .title("Bookmarks"),
-            ContextPage::Settings => context_drawer::context_drawer(
-                pages::settings::view(
-                    &self.config,
-                    &self.custom_filter_list_url,
-                    pages::settings::DataClearing {
-                        range: self.clear_range,
-                        history_checked: self.clear_history_checked,
-                        cookies_checked: self.clear_cookies_checked,
-                        site_domains: &self.site_data_domains,
-                    },
-                    pages::settings::Permissions {
-                        defaults: &self.config.permission_defaults,
-                        grants: &self.permission_grants,
-                        allow_camera_microphone: self.config.allow_camera_microphone,
-                    },
-                ),
-                Message::SettingsClose,
+            ContextPage::NewTabSettings => context_drawer::context_drawer(
+                pages::settings::new_tab_settings(&self.config),
+                Message::CloseNewTabSettings,
             )
-            .title("Settings"),
+            .title("New Tab"),
         })
     }
 
     fn header_end(&self) -> Vec<Element<'_, Message>> {
-        let bookmarks_btn =
-            widget::button::icon(widget::icon::from_name("user-bookmarks-symbolic"))
-                .on_press(Message::BookmarkOpen);
-        let history_btn =
-            widget::button::icon(widget::icon::from_name("document-open-recent-symbolic"))
-                .on_press(Message::HistoryOpen);
-        let settings_btn = widget::button::icon(widget::icon::from_name("emblem-system-symbolic"))
-            .on_press(Message::SettingsOpen);
-        vec![
-            bookmarks_btn.into(),
-            history_btn.into(),
-            settings_btn.into(),
-        ]
+        // Bookmarks, history, and settings moved into the toolbar overflow menu
+        // (see `build_app_menu`) to free up header space for the tab bar.
+        vec![]
     }
 
     fn header_center(&self) -> Vec<Element<'_, Message>> {
@@ -2703,6 +2846,29 @@ impl libcosmic::Application for App {
             return widget::text("No active tab").into();
         };
 
+        // A settings tab renders the settings page full-window, without the
+        // address bar (it has no web page to navigate).
+        if tab.kind == TabKind::Settings {
+            return widget::container(pages::settings::view(
+                &self.settings_nav,
+                &self.config,
+                &self.custom_filter_list_url,
+                pages::settings::DataClearing {
+                    range: self.clear_range,
+                    history_checked: self.clear_history_checked,
+                    cookies_checked: self.clear_cookies_checked,
+                    site_domains: &self.site_data_domains,
+                },
+                pages::settings::Permissions {
+                    defaults: &self.config.permission_defaults,
+                    grants: &self.permission_grants,
+                    allow_camera_microphone: self.config.allow_camera_microphone,
+                },
+            ))
+            .height(Length::Fill)
+            .into();
+        }
+
         let (can_back, can_forward, is_loading) = (
             tab.servo.can_go_back(),
             tab.servo.can_go_forward(),
@@ -2741,7 +2907,7 @@ impl libcosmic::Application for App {
         }
         .view();
 
-        let nav_row = widget::row::with_capacity(5)
+        let nav_row = widget::row::with_capacity(6)
             .align_y(libcosmic::iced::Alignment::Center)
             .push(back)
             .push(forward)
@@ -2751,7 +2917,8 @@ impl libcosmic::Application for App {
                 widget::progress_bar::indeterminate_circular()
                     .size(24.0)
                     .bar_height(3.0)
-            }));
+            }))
+            .push(build_app_menu());
 
         // Show the internal New Tab page instead of the webview when this tab
         // opened on it and has not navigated yet.
@@ -2762,6 +2929,7 @@ impl libcosmic::Application for App {
                 &self.tile_images,
                 self.config.new_tab_columns,
                 self.config.new_tab_rows,
+                self.hovered_tile.as_deref(),
             ))
             .height(Length::Fill)
             .into()

@@ -1,19 +1,20 @@
 use libcosmic::iced::{Alignment, Length};
 use libcosmic::prelude::*;
 use libcosmic::widget;
+use libcosmic::widget::segmented_button;
 
 use crate::app::Message;
 use crate::config::{
-    BrowserConfig, ClearRange, CookieProtectionLevel, PermissionDefault, PermissionDefaults,
-    PermissionKind, StartupPage,
+    BUILTIN_ENGINES, BrowserConfig, ClearRange, CookieProtectionLevel, PermissionDefault,
+    PermissionDefaults, PermissionKind, SearchEngine, StartupPage,
 };
 
 /// Selectable column counts for the New Tab grid.
 const COLUMN_CHOICES: &[u16] = &[3, 4, 5, 6, 7, 8];
 /// Selectable row counts for the New Tab grid.
 const ROW_CHOICES: &[u16] = &[1, 2, 3, 4, 5, 6];
-/// New-tab-page kinds, in dropdown order (index maps to a `StartupPage` variant).
-const NEW_TAB_KINDS: &[&str] = &["New Tab page", "Fixed URL", "Search engine"];
+/// Page kinds, in dropdown order (index maps to a `StartupPage` variant).
+const PAGE_KINDS: &[&str] = &["New Tab page", "Fixed URL", "Search engine"];
 /// Cookie-protection levels, in dropdown order (index maps to the enum).
 const COOKIE_LEVELS: &[CookieProtectionLevel] = &[
     CookieProtectionLevel::Standard,
@@ -42,57 +43,219 @@ pub struct Permissions<'a> {
     pub allow_camera_microphone: bool,
 }
 
-/// Settings drawer content: New Tab grid size, privacy settings, and filter lists.
+/// A labeled "which page to open" dropdown plus a conditional URL field, shared
+/// by the startup-page and new-tab-page settings.
+fn page_kind_controls<'a>(
+    label: &'a str,
+    page: &'a StartupPage,
+    on_kind: fn(usize) -> Message,
+    on_url: fn(String) -> Message,
+) -> Element<'a, Message> {
+    let selected = match page {
+        StartupPage::NewTab => 0,
+        StartupPage::Url(_) => 1,
+        StartupPage::SearchEngine => 2,
+    };
+    let kind_row = widget::row::with_capacity(2)
+        .push(widget::text(label).width(Length::Fill))
+        .push(widget::dropdown(PAGE_KINDS, Some(selected), on_kind))
+        .align_y(Alignment::Center);
+
+    let mut col = widget::column::with_capacity(2)
+        .push(kind_row)
+        .spacing(libcosmic::theme::spacing().space_s);
+    // The URL field only applies to the "Fixed URL" kind.
+    if let StartupPage::Url(url) = page {
+        col = col.push(
+            widget::text_input("https://example.com", url)
+                .on_input(on_url)
+                .width(Length::Fill),
+        );
+    }
+    col.into()
+}
+
+/// New Tab settings drawer content: grid size and what new tabs open.
+///
+/// Kept separate from the main settings page and reached from a gear button on
+/// the New Tab page, since it only concerns that page.
+pub fn new_tab_settings(config: &BrowserConfig) -> Element<'_, Message> {
+    widget::column::with_capacity(3)
+        .push(number_row(
+            "Grid columns",
+            COLUMN_CHOICES,
+            config.new_tab_columns,
+            Message::SetNewTabColumns,
+        ))
+        .push(number_row(
+            "Grid rows",
+            ROW_CHOICES,
+            config.new_tab_rows,
+            Message::SetNewTabRows,
+        ))
+        .push(page_kind_controls(
+            "New tab opens",
+            &config.new_tab_page,
+            Message::SetNewTabPageKind,
+            Message::SetNewTabUrl,
+        ))
+        .spacing(libcosmic::theme::spacing().space_s)
+        .width(Length::Fill)
+        .into()
+}
+
+/// A section of the settings page, shown one at a time via the side navigation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SettingsSection {
+    /// Startup page and search engine.
+    #[default]
+    General,
+    /// Tracking protection and custom filter lists.
+    Privacy,
+    /// Per-site permission defaults and exceptions.
+    Permissions,
+    /// Default web-content fonts.
+    Fonts,
+    /// Clear browsing data.
+    ClearData,
+}
+
+impl SettingsSection {
+    /// All sections, in navigation order.
+    pub const ALL: &'static [SettingsSection] = &[
+        SettingsSection::General,
+        SettingsSection::Privacy,
+        SettingsSection::Permissions,
+        SettingsSection::Fonts,
+        SettingsSection::ClearData,
+    ];
+
+    /// The label shown in the side navigation.
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsSection::General => "General",
+            SettingsSection::Privacy => "Privacy",
+            SettingsSection::Permissions => "Permissions",
+            SettingsSection::Fonts => "Fonts",
+            SettingsSection::ClearData => "Clear data",
+        }
+    }
+}
+
+/// Settings page: a side navigation of sections and the selected section's
+/// content, laid out like cosmic-settings.
 pub fn view<'a>(
+    nav: &'a segmented_button::SingleSelectModel,
     config: &'a BrowserConfig,
     filter_list_url: &'a str,
     clearing: DataClearing<'a>,
     permissions: Permissions<'a>,
 ) -> Element<'a, Message> {
-    let columns = number_row(
-        "Grid columns",
-        COLUMN_CHOICES,
-        config.new_tab_columns,
-        Message::SetNewTabColumns,
-    );
-    let rows = number_row(
-        "Grid rows",
-        ROW_CHOICES,
-        config.new_tab_rows,
-        Message::SetNewTabRows,
-    );
+    let spacing = libcosmic::theme::spacing();
+    let section = nav
+        .active_data::<SettingsSection>()
+        .copied()
+        .unwrap_or_default();
 
-    let kind_selected = match config.new_tab_page {
-        StartupPage::NewTab => 0,
-        StartupPage::Url(_) => 1,
-        StartupPage::SearchEngine => 2,
+    let nav_column = segmented_button::vertical(nav)
+        .on_activate(Message::SettingsSectionSelected)
+        .width(Length::Fixed(200.0));
+
+    let content = match section {
+        SettingsSection::General => general_section(config),
+        SettingsSection::Privacy => privacy_section(config, filter_list_url),
+        SettingsSection::Permissions => permissions_section(permissions),
+        SettingsSection::Fonts => fonts_section(config),
+        SettingsSection::ClearData => data_clearing_section(clearing),
     };
-    let new_tab_kind = widget::row::with_capacity(2)
-        .push(widget::text("New tab opens").width(Length::Fill))
+    let scroll = widget::scrollable(
+        widget::container(content)
+            .max_width(720.0)
+            .padding(spacing.space_l),
+    )
+    .height(Length::Fill);
+
+    widget::row::with_capacity(2)
+        .push(nav_column)
+        .push(scroll)
+        .spacing(spacing.space_m)
+        .padding(spacing.space_m)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Build the "General" section: startup page and default search engine.
+fn general_section(config: &BrowserConfig) -> Element<'_, Message> {
+    let spacing = libcosmic::theme::spacing();
+    widget::column::with_capacity(4)
+        .push(widget::text::title4("Startup"))
+        .push(page_kind_controls(
+            "On startup show",
+            &config.startup_page,
+            Message::SetStartupPageKind,
+            Message::SetStartupUrl,
+        ))
+        .push(widget::text::title4("Search"))
+        .push(search_engine_controls(config))
+        .spacing(spacing.space_s)
+        .width(Length::Fill)
+        .into()
+}
+
+/// Build the default-search-engine controls: a dropdown of built-in engines plus
+/// a "Custom" option that reveals a URL-template field.
+fn search_engine_controls(config: &BrowserConfig) -> Element<'_, Message> {
+    let spacing = libcosmic::theme::spacing();
+    let mut labels: Vec<&str> = BUILTIN_ENGINES.iter().map(SearchEngine::name).collect();
+    labels.push("Custom");
+    let selected = match &config.search_engine {
+        SearchEngine::Custom(_) => BUILTIN_ENGINES.len(),
+        engine => BUILTIN_ENGINES
+            .iter()
+            .position(|e| e == engine)
+            .unwrap_or(0),
+    };
+
+    // Preserve any existing custom template when re-selecting "Custom".
+    let existing_custom = match &config.search_engine {
+        SearchEngine::Custom(t) => t.clone(),
+        _ => String::new(),
+    };
+    let engine_row = widget::row::with_capacity(2)
+        .push(widget::text("Search engine").width(Length::Fill))
         .push(widget::dropdown(
-            NEW_TAB_KINDS,
-            Some(kind_selected),
-            Message::SetNewTabPageKind,
+            labels,
+            Some(selected),
+            move |i| match BUILTIN_ENGINES.get(i) {
+                Some(engine) => Message::SetSearchEngine(engine.clone()),
+                None => Message::SetSearchEngine(SearchEngine::Custom(existing_custom.clone())),
+            },
         ))
         .align_y(Alignment::Center);
 
-    let mut column = widget::column::with_capacity(4)
-        .push(widget::text::title4("New Tab page"))
-        .push(columns)
-        .push(rows)
-        .push(new_tab_kind)
-        .spacing(12)
-        .width(Length::Fill);
-
-    // The URL field only applies to the "Fixed URL" kind.
-    if let StartupPage::Url(url) = &config.new_tab_page {
-        column = column.push(
-            widget::text_input("https://example.com", url)
-                .on_input(Message::SetNewTabUrl)
-                .width(Length::Fill),
-        );
+    let mut col = widget::column::with_capacity(3)
+        .push(engine_row)
+        .spacing(spacing.space_xs);
+    if let SearchEngine::Custom(template) = &config.search_engine {
+        col = col
+            .push(
+                widget::text_input("https://example.com/search?q={query}", template)
+                    .on_input(Message::SetCustomSearchUrl)
+                    .width(Length::Fill),
+            )
+            .push(widget::text::caption(
+                "Use {query} where the search terms should go.",
+            ));
     }
+    col.into()
+}
 
+/// Build the "Privacy" section: tracking protection level and custom filter lists.
+fn privacy_section<'a>(
+    config: &'a BrowserConfig,
+    filter_list_url: &'a str,
+) -> Element<'a, Message> {
+    let spacing = libcosmic::theme::spacing();
     let cookie_selected = COOKIE_LEVELS
         .iter()
         .position(|&l| l == config.cookie_protection);
@@ -117,10 +280,9 @@ pub fn view<'a>(
         }
     };
 
-    // ── Custom filter lists ────────────────────────────────────────────────────
     let mut filter_section = widget::column::with_capacity(8)
         .push(widget::text::title4("Custom filter lists"))
-        .spacing(8);
+        .spacing(spacing.space_xxs);
 
     for (i, entry) in config.custom_filter_lists.iter().enumerate() {
         let toggle =
@@ -133,7 +295,7 @@ pub fn view<'a>(
             .push(label)
             .push(remove)
             .align_y(Alignment::Center)
-            .spacing(8);
+            .spacing(spacing.space_xxs);
         filter_section = filter_section.push(row);
     }
 
@@ -149,17 +311,16 @@ pub fn view<'a>(
             can_add.then(|| Message::AddCustomFilterList(filter_list_url.to_owned())),
         ))
         .align_y(Alignment::Center)
-        .spacing(8);
+        .spacing(spacing.space_xxs);
     filter_section = filter_section.push(add_row);
 
-    column
+    widget::column::with_capacity(4)
         .push(widget::text::title4("Privacy"))
         .push(cookie_row)
         .push(widget::text::caption(cookie_description))
         .push(filter_section)
-        .push(data_clearing_section(clearing))
-        .push(permissions_section(permissions))
-        .push(fonts_section(config))
+        .spacing(spacing.space_s)
+        .width(Length::Fill)
         .into()
 }
 
