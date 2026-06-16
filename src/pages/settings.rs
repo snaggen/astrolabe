@@ -3,7 +3,10 @@ use libcosmic::prelude::*;
 use libcosmic::widget;
 
 use crate::app::Message;
-use crate::config::{BrowserConfig, ClearRange, CookieProtectionLevel, StartupPage};
+use crate::config::{
+    BrowserConfig, ClearRange, CookieProtectionLevel, PermissionDefault, PermissionDefaults,
+    PermissionKind, StartupPage,
+};
 
 /// Selectable column counts for the New Tab grid.
 const COLUMN_CHOICES: &[u16] = &[3, 4, 5, 6, 7, 8];
@@ -29,11 +32,22 @@ pub struct DataClearing<'a> {
     pub site_domains: &'a [String],
 }
 
+/// State for the "Site permissions" settings section.
+pub struct Permissions<'a> {
+    /// Global default response per configurable permission category.
+    pub defaults: &'a PermissionDefaults,
+    /// Stored per-site grants as `(domain, feature_key, allow)`, sorted.
+    pub grants: &'a [(String, String, bool)],
+    /// Whether sites may use the camera and microphone.
+    pub allow_camera_microphone: bool,
+}
+
 /// Settings drawer content: New Tab grid size, privacy settings, and filter lists.
 pub fn view<'a>(
     config: &'a BrowserConfig,
     filter_list_url: &'a str,
     clearing: DataClearing<'a>,
+    permissions: Permissions<'a>,
 ) -> Element<'a, Message> {
     let columns = number_row(
         "Grid columns",
@@ -144,6 +158,7 @@ pub fn view<'a>(
         .push(widget::text::caption(cookie_description))
         .push(filter_section)
         .push(data_clearing_section(clearing))
+        .push(permissions_section(permissions))
         .into()
 }
 
@@ -206,6 +221,80 @@ fn data_clearing_section(clearing: DataClearing<'_>) -> Element<'_, Message> {
             let row = widget::row::with_capacity(2)
                 .push(widget::text(domain.as_str()).width(Length::Fill))
                 .push(remove)
+                .align_y(Alignment::Center)
+                .spacing(spacing.space_xxs);
+            section = section.push(row);
+        }
+    }
+
+    section.into()
+}
+
+/// Build the "Site permissions" section: a global default per category and a
+/// list of stored per-site exceptions that can be revoked.
+fn permissions_section(permissions: Permissions<'_>) -> Element<'_, Message> {
+    let spacing = libcosmic::theme::spacing();
+    let default_labels: Vec<&str> = PermissionDefault::ALL
+        .iter()
+        .map(PermissionDefault::label)
+        .collect();
+
+    // Camera & microphone are a single engine-level switch: Servo exposes
+    // getUserMedia without a per-site prompt, so this is an explicit opt-in.
+    let camera_mic = widget::row::with_capacity(2)
+        .push(widget::text("Allow sites to use camera and microphone").width(Length::Fill))
+        .push(
+            widget::toggler(permissions.allow_camera_microphone)
+                .on_toggle(Message::SetAllowCameraMicrophone),
+        )
+        .align_y(Alignment::Center);
+
+    let mut section = widget::column::with_capacity(8)
+        .push(widget::text::title4("Site permissions"))
+        .push(widget::text::caption(
+            "Default response when a site asks for a permission.",
+        ))
+        .push(camera_mic)
+        .push(widget::text::caption(
+            "Camera and microphone are granted without a prompt; takes effect on the next page load.",
+        ))
+        .spacing(spacing.space_xxs);
+
+    for kind in PermissionKind::ALL {
+        let current = permissions.defaults.get(kind);
+        let selected = PermissionDefault::ALL.iter().position(|&d| d == current);
+        let row = widget::row::with_capacity(2)
+            .push(widget::text(kind.label()).width(Length::Fill))
+            .push(widget::dropdown(
+                default_labels.clone(),
+                selected,
+                move |i| {
+                    let value = PermissionDefault::ALL.get(i).copied().unwrap_or_default();
+                    Message::SetPermissionDefault(kind, value)
+                },
+            ))
+            .align_y(Alignment::Center);
+        section = section.push(row);
+    }
+
+    if !permissions.grants.is_empty() {
+        section = section.push(widget::text::heading("Site exceptions")).push(
+            widget::button::standard("Reset all site permissions")
+                .on_press(Message::ResetAllSitePermissions),
+        );
+        for (domain, key, allow) in permissions.grants {
+            let label = cosmic_webview::permission::feature_label_from_key(key).unwrap_or(key);
+            let decision = if *allow { "Allow" } else { "Block" };
+            let revoke = widget::tooltip(
+                widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                    .on_press(Message::RevokeSitePermission(domain.clone(), key.clone())),
+                widget::text::body("Revoke this permission"),
+                widget::tooltip::Position::Left,
+            );
+            let row = widget::row::with_capacity(3)
+                .push(widget::text(format!("{domain} — {label}")).width(Length::Fill))
+                .push(widget::text::caption(decision))
+                .push(revoke)
                 .align_y(Alignment::Center)
                 .spacing(spacing.space_xxs);
             section = section.push(row);

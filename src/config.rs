@@ -229,6 +229,100 @@ pub struct FilterListEntry {
     pub enabled: bool,
 }
 
+/// Default response to a site's permission request when the user has made no
+/// per-site choice.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum PermissionDefault {
+    /// Prompt the user every time (browser default).
+    #[default]
+    Ask,
+    /// Grant the permission automatically.
+    Allow,
+    /// Deny the permission automatically.
+    Block,
+}
+
+impl PermissionDefault {
+    /// Human-readable label shown in the defaults dropdown.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Ask => "Ask",
+            Self::Allow => "Allow",
+            Self::Block => "Block",
+        }
+    }
+
+    /// All variants in dropdown order.
+    pub const ALL: [PermissionDefault; 3] = [Self::Ask, Self::Allow, Self::Block];
+}
+
+/// A permission category that exposes a configurable global default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionKind {
+    Geolocation,
+    Notifications,
+    Camera,
+    Microphone,
+    PersistentStorage,
+}
+
+impl PermissionKind {
+    /// Human-readable label shown in the settings UI.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Geolocation => "Location",
+            Self::Notifications => "Notifications",
+            Self::Camera => "Camera",
+            Self::Microphone => "Microphone",
+            Self::PersistentStorage => "Persistent storage",
+        }
+    }
+
+    /// All configurable categories, in display order.
+    pub const ALL: [PermissionKind; 5] = [
+        Self::Geolocation,
+        Self::Notifications,
+        Self::Camera,
+        Self::Microphone,
+        Self::PersistentStorage,
+    ];
+}
+
+/// Global default response for each configurable permission category.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct PermissionDefaults {
+    pub geolocation: PermissionDefault,
+    pub notifications: PermissionDefault,
+    pub camera: PermissionDefault,
+    pub microphone: PermissionDefault,
+    pub persistent_storage: PermissionDefault,
+}
+
+impl PermissionDefaults {
+    /// The configured default for `kind`.
+    pub fn get(&self, kind: PermissionKind) -> PermissionDefault {
+        match kind {
+            PermissionKind::Geolocation => self.geolocation,
+            PermissionKind::Notifications => self.notifications,
+            PermissionKind::Camera => self.camera,
+            PermissionKind::Microphone => self.microphone,
+            PermissionKind::PersistentStorage => self.persistent_storage,
+        }
+    }
+
+    /// Set the default for `kind`.
+    pub fn set(&mut self, kind: PermissionKind, value: PermissionDefault) {
+        match kind {
+            PermissionKind::Geolocation => self.geolocation = value,
+            PermissionKind::Notifications => self.notifications = value,
+            PermissionKind::Camera => self.camera = value,
+            PermissionKind::Microphone => self.microphone = value,
+            PermissionKind::PersistentStorage => self.persistent_storage = value,
+        }
+    }
+}
+
 /// Persistent browser configuration, stored via `cosmic_config`.
 #[derive(Clone, CosmicConfigEntry, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
@@ -251,6 +345,11 @@ pub struct BrowserConfig {
     pub cookie_protection: CookieProtectionLevel,
     /// User-configured external filter lists (ABP / uBlock format).
     pub custom_filter_lists: Vec<FilterListEntry>,
+    /// Global default response for each configurable permission category.
+    pub permission_defaults: PermissionDefaults,
+    /// Whether sites may use the camera and microphone. Off by default because
+    /// Servo grants `getUserMedia` without a per-site prompt.
+    pub allow_camera_microphone: bool,
 }
 
 impl Default for BrowserConfig {
@@ -264,6 +363,8 @@ impl Default for BrowserConfig {
             new_tab_rows: 2,
             cookie_protection: CookieProtectionLevel::default(),
             custom_filter_lists: Vec::new(),
+            permission_defaults: PermissionDefaults::default(),
+            allow_camera_microphone: false,
         }
     }
 }

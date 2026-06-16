@@ -83,6 +83,13 @@ async fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             domain              TEXT    NOT NULL PRIMARY KEY,
             cookie_protection   TEXT    NOT NULL,
             updated_at          INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS site_permissions (
+            domain     TEXT    NOT NULL,
+            feature    TEXT    NOT NULL,
+            decision   TEXT    NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (domain, feature)
         );",
     )
     .await?;
@@ -531,6 +538,76 @@ pub async fn load_site_setting(
     Ok(None)
 }
 
+// ── Per-site permissions ──────────────────────────────────────────────────────
+
+/// A stored per-site permission grant: which `feature` a `domain` may use and the
+/// `decision` (`"allow"` or `"block"`).
+#[derive(Clone, Debug)]
+pub struct SitePermission {
+    pub domain: String,
+    pub feature: String,
+    pub decision: String,
+}
+
+/// Persist a per-site permission decision, upserting on (domain, feature).
+pub async fn save_site_permission(
+    conn: Connection,
+    domain: String,
+    feature: String,
+    decision: String,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO site_permissions (domain, feature, decision, updated_at)
+         VALUES (?1, ?2, ?3, unixepoch())
+         ON CONFLICT(domain, feature) DO UPDATE SET
+             decision   = excluded.decision,
+             updated_at = excluded.updated_at",
+        (domain.as_str(), feature.as_str(), decision.as_str()),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove a single per-site permission grant.
+pub async fn delete_site_permission(
+    conn: Connection,
+    domain: String,
+    feature: String,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "DELETE FROM site_permissions WHERE domain = ?1 AND feature = ?2",
+        (domain.as_str(), feature.as_str()),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove every per-site permission grant (revoke globally).
+pub async fn clear_all_site_permissions(conn: Connection) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM site_permissions", ()).await?;
+    Ok(())
+}
+
+/// Load all per-site permission grants, ordered by domain then feature.
+pub async fn query_site_permissions(conn: Connection) -> anyhow::Result<Vec<SitePermission>> {
+    let mut rows = conn
+        .query(
+            "SELECT domain, feature, decision FROM site_permissions
+             ORDER BY domain, feature",
+            (),
+        )
+        .await?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().await? {
+        entries.push(SitePermission {
+            domain: row.get(0)?,
+            feature: row.get(1)?,
+            decision: row.get(2)?,
+        });
+    }
+    Ok(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,6 +738,50 @@ mod tests {
                 .await?;
             let count: i64 = rows.next().await?.expect("count row").get(0)?;
             assert_eq!(count, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn site_permissions_round_trip_and_revoke() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            let conn = temp_db().await?;
+            save_site_permission(
+                conn.clone(),
+                "example.com".into(),
+                "camera".into(),
+                "allow".into(),
+            )
+            .await?;
+            save_site_permission(
+                conn.clone(),
+                "other.com".into(),
+                "geolocation".into(),
+                "block".into(),
+            )
+            .await?;
+            // Upsert: a second decision for the same (domain, feature) replaces it.
+            save_site_permission(
+                conn.clone(),
+                "example.com".into(),
+                "camera".into(),
+                "block".into(),
+            )
+            .await?;
+
+            let grants = query_site_permissions(conn.clone()).await?;
+            assert_eq!(grants.len(), 2);
+            let camera = grants
+                .iter()
+                .find(|g| g.domain == "example.com" && g.feature == "camera")
+                .expect("camera grant");
+            assert_eq!(camera.decision, "block");
+
+            delete_site_permission(conn.clone(), "example.com".into(), "camera".into()).await?;
+            assert_eq!(query_site_permissions(conn.clone()).await?.len(), 1);
+
+            clear_all_site_permissions(conn.clone()).await?;
+            assert!(query_site_permissions(conn).await?.is_empty());
             Ok(())
         })
     }

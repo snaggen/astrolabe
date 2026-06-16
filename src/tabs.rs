@@ -1,5 +1,5 @@
 use async_channel::Receiver;
-use cosmic_webview::{PermissionFeature, PermissionRequest, ServoState};
+use cosmic_webview::{BluetoothDeviceSelectionRequest, PermissionRequest, ServoState};
 use dpi::PhysicalSize;
 use url::Url;
 
@@ -29,12 +29,12 @@ pub struct TabState {
     /// Per-site cookie-protection level chosen via the URL-bar indicator, or
     /// `None` to follow the global default. Reset when the tab navigates.
     pub cookie_protection_override: Option<crate::config::CookieProtectionLevel>,
-    /// Permission features the user has granted for the current page. Shown in
-    /// the permissions popover and revocable there.
-    pub granted_permissions: Vec<PermissionFeature>,
     /// A permission request from the page awaiting the user's allow/deny choice.
     /// At most one is shown at a time; a newer request replaces an unanswered one.
     pub pending_permission: Option<PermissionRequest>,
+    /// A Bluetooth device-selection request from the page awaiting the user's
+    /// choice. Shown as a picker dialog; a newer request replaces an unanswered one.
+    pub pending_bluetooth: Option<BluetoothDeviceSelectionRequest>,
 }
 
 impl TabState {
@@ -51,8 +51,8 @@ impl TabState {
                 show_new_tab_page: false,
                 thumb_captured_url: None,
                 cookie_protection_override: None,
-                granted_permissions: Vec::new(),
                 pending_permission: None,
+                pending_bluetooth: None,
             },
             rx,
         )

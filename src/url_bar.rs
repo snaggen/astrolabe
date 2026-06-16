@@ -5,9 +5,21 @@ use libcosmic::iced::{Alignment, Length};
 use libcosmic::prelude::*;
 use libcosmic::widget;
 
-use crate::app::Message;
+use crate::app::{Message, PermissionResponse};
 use crate::config::{BUILTIN_ENGINES, CookieProtectionLevel, SearchEngine};
 use crate::db::{Suggestion, SuggestionKind};
+
+/// A permission decision for the active site, shown in the permissions popover.
+pub struct PermissionEntry {
+    /// Stable feature key, used to clear the decision.
+    pub key: String,
+    /// Human-readable feature label.
+    pub label: &'static str,
+    /// `true` if the feature is allowed, `false` if blocked.
+    pub allowed: bool,
+    /// `true` for a persistent (stored) decision, `false` for session-only.
+    pub persistent: bool,
+}
 
 /// Stable widget id for the URL bar text input, so keyboard shortcuts can move
 /// focus to it (Ctrl+L). Must stay constant across `view()` calls.
@@ -69,9 +81,9 @@ pub struct AddressBar<'a> {
     pub cookie_override: Option<CookieProtectionLevel>,
     /// The browser-wide default protection level (from settings).
     pub global_cookie_level: CookieProtectionLevel,
-    /// Permissions the user has granted for the active page; the indicator is
-    /// hidden when empty.
-    pub permissions: &'a [PermissionFeature],
+    /// Permission decisions (allow/block, session/persistent) for the active
+    /// site; the indicator is hidden when empty.
+    pub permissions: Vec<PermissionEntry>,
     /// Whether the active page is bookmarked (controls the star icon).
     pub is_bookmarked: bool,
     /// Active page zoom (`1.0` = 100 %); the zoom label is hidden at 100 %.
@@ -277,27 +289,13 @@ fn cookie_popup<'a>(
 
 /// Human-readable name for a permission feature.
 fn permission_label(feature: PermissionFeature) -> &'static str {
-    match feature {
-        PermissionFeature::Geolocation => "Location",
-        PermissionFeature::Notifications => "Notifications",
-        PermissionFeature::Push => "Push messages",
-        PermissionFeature::Midi => "MIDI devices",
-        PermissionFeature::Camera => "Camera",
-        PermissionFeature::Microphone => "Microphone",
-        PermissionFeature::Speaker => "Speaker selection",
-        PermissionFeature::DeviceInfo => "Device information",
-        PermissionFeature::BackgroundSync => "Background sync",
-        PermissionFeature::Bluetooth => "Bluetooth",
-        PermissionFeature::PersistentStorage => "Persistent storage",
-        PermissionFeature::ScreenWakeLock(_) => "Screen wake lock",
-        PermissionFeature::Gamepad => "Gamepad",
-    }
+    cosmic_webview::permission::feature_label(feature)
 }
 
-/// The permissions indicator: a key icon shown only when the page has active
-/// grants. Clicking it lists them with a revoke action.
+/// The permissions indicator: a key icon shown only when the site has a stored
+/// or session permission decision. Clicking it lists them with a clear action.
 fn permission_indicator<'a>(
-    permissions: &[PermissionFeature],
+    permissions: Vec<PermissionEntry>,
     open: Option<UrlBarPopover>,
 ) -> Option<Element<'a, Message>> {
     if permissions.is_empty() {
@@ -321,18 +319,33 @@ fn permission_indicator<'a>(
     Some(popover.into())
 }
 
-/// Popover body listing each granted permission with a revoke button.
-fn permission_popup<'a>(permissions: &[PermissionFeature]) -> Element<'a, Message> {
+/// Popover body listing each permission decision with its state and a clear
+/// button. Clearing a persistent block here lifts it, like revoking a grant.
+fn permission_popup<'a>(permissions: Vec<PermissionEntry>) -> Element<'a, Message> {
     let mut column = widget::column::with_capacity(permissions.len() + 1)
         .spacing(8)
-        .width(Length::Fixed(260.0))
+        .width(Length::Fixed(280.0))
         .push(widget::text::body("Permissions for this site"));
 
-    for &feature in permissions {
+    for entry in permissions {
+        let state = match (entry.allowed, entry.persistent) {
+            (true, true) => "Allowed",
+            (true, false) => "Allowed this session",
+            (false, true) => "Blocked",
+            (false, false) => "Blocked this session",
+        };
+        let label = widget::column::with_capacity(2)
+            .width(Length::Fill)
+            .push(widget::text(entry.label))
+            .push(widget::text::caption(state));
+        let clear = widget::button::text("Clear").on_press(Message::PermissionClear {
+            key: entry.key,
+            persistent: entry.persistent,
+        });
         let row = widget::row::with_capacity(2)
             .align_y(Alignment::Center)
-            .push(widget::text(permission_label(feature)).width(Length::Fill))
-            .push(widget::button::text("Revoke").on_press(Message::PermissionRevoke(feature)));
+            .push(label)
+            .push(clear);
         column = column.push(row);
     }
 
@@ -342,10 +355,11 @@ fn permission_popup<'a>(permissions: &[PermissionFeature]) -> Element<'a, Messag
         .into()
 }
 
-/// Inline banner that asks the user to allow or block a permission request.
-/// Shown below the toolbar while a request is pending.
+/// Inline banner that asks the user how to answer a permission request, with
+/// session and persistent allow/block choices. Shown below the toolbar while a
+/// request is pending.
 pub fn permission_prompt<'a>(feature: PermissionFeature) -> Element<'a, Message> {
-    let row = widget::row::with_capacity(3)
+    let row = widget::row::with_capacity(5)
         .align_y(Alignment::Center)
         .spacing(8)
         .push(
@@ -355,8 +369,22 @@ pub fn permission_prompt<'a>(feature: PermissionFeature) -> Element<'a, Message>
             ))
             .width(Length::Fill),
         )
-        .push(widget::button::standard("Block").on_press(Message::PermissionDeny))
-        .push(widget::button::suggested("Allow").on_press(Message::PermissionAllow));
+        .push(
+            widget::button::standard("Block")
+                .on_press(Message::PermissionRespond(PermissionResponse::Block)),
+        )
+        .push(
+            widget::button::text("Deny once")
+                .on_press(Message::PermissionRespond(PermissionResponse::DenySession)),
+        )
+        .push(
+            widget::button::text("Allow once")
+                .on_press(Message::PermissionRespond(PermissionResponse::AllowSession)),
+        )
+        .push(
+            widget::button::suggested("Allow always")
+                .on_press(Message::PermissionRespond(PermissionResponse::AllowAlways)),
+        );
 
     widget::container(row)
         .padding(8)

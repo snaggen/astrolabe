@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use cosmic_webview::{
     ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EditingActionEvent,
-    EmbedderControl, InputEvent, PermissionFeature, WebViewWidget,
+    EmbedderControl, InputEvent, PermissionFeature, WebViewWidget, permission,
 };
 use dpi::PhysicalSize;
 use libcosmic::app::context_drawer;
@@ -20,9 +20,11 @@ use url::Url;
 
 use crate::config::{
     BUILTIN_ENGINES, BrowserConfig, ClearRange, CookieProtectionLevel, FilterListEntry,
-    SearchEngine, StartupPage, extract_search_query,
+    PermissionDefault, PermissionKind, SearchEngine, StartupPage, extract_search_query,
 };
-use crate::db::{BookmarkEntry, HistoryEntry, HistorySort, Suggestion, SuggestionKind};
+use crate::db::{
+    BookmarkEntry, HistoryEntry, HistorySort, SitePermission, Suggestion, SuggestionKind,
+};
 use crate::filter_engine::FilterEngines;
 use crate::pages;
 use crate::tabs::TabState;
@@ -37,10 +39,87 @@ const ZOOM_MAX: f32 = 5.0;
 /// History rows fetched for the grid; trimmed to the visible cell count in `view`.
 const NEW_TAB_TOP_SITES: usize = 48;
 
-/// Compare two permission features by variant. `PermissionFeature` is `Copy`
-/// but does not implement `PartialEq`, so we match on the discriminant.
-fn same_feature(a: PermissionFeature, b: PermissionFeature) -> bool {
-    std::mem::discriminant(&a) == std::mem::discriminant(&b)
+/// Map a permission feature to its configurable global-default category, if it
+/// has one. Features without a dedicated default always fall back to "ask".
+///
+/// Feature comparison, stable keys, and labels live in
+/// [`cosmic_webview::permission`] so every embedder shares them.
+fn permission_kind(feature: PermissionFeature) -> Option<crate::config::PermissionKind> {
+    use crate::config::PermissionKind;
+    match feature {
+        PermissionFeature::Geolocation => Some(PermissionKind::Geolocation),
+        PermissionFeature::Notifications => Some(PermissionKind::Notifications),
+        PermissionFeature::Camera => Some(PermissionKind::Camera),
+        PermissionFeature::Microphone => Some(PermissionKind::Microphone),
+        PermissionFeature::PersistentStorage => Some(PermissionKind::PersistentStorage),
+        _ => None,
+    }
+}
+
+/// Build the Bluetooth device-selection dialog listing `devices`. Picking a row
+/// emits [`Message::BluetoothPick`]; cancelling emits [`Message::BluetoothCancel`].
+fn bluetooth_dialog(
+    devices: &[cosmic_webview::BluetoothDeviceDescription],
+) -> Element<'_, Message> {
+    let spacing = libcosmic::theme::spacing();
+    let mut dialog = widget::dialog()
+        .title("Connect to a Bluetooth device")
+        .secondary_action(widget::button::standard("Cancel").on_press(Message::BluetoothCancel));
+
+    if devices.is_empty() {
+        dialog = dialog.body("No devices found.");
+    } else {
+        let mut list = widget::column::with_capacity(devices.len()).spacing(spacing.space_xxs);
+        for (index, device) in devices.iter().enumerate() {
+            let name = if device.name.is_empty() {
+                "Unknown device"
+            } else {
+                device.name.as_str()
+            };
+            // Show the address beneath the name: many BLE devices advertise no
+            // friendly name, so the address is what distinguishes them.
+            let content = widget::column::with_capacity(2)
+                .push(widget::text::body(name))
+                .push(widget::text::caption(device.address.as_str()));
+            list = list.push(
+                widget::button::custom(content)
+                    .width(Length::Fill)
+                    .on_press(Message::BluetoothPick(index)),
+            );
+        }
+        dialog = dialog.control(list);
+    }
+    dialog.into()
+}
+
+/// The host of the tab's current URL, if any — the key for per-site grants.
+fn current_domain(tab: &crate::tabs::TabState) -> Option<String> {
+    tab.servo
+        .current_url()
+        .and_then(|u| u.host_str().map(str::to_owned))
+}
+
+/// The user's answer to a permission prompt.
+#[derive(Clone, Copy, Debug)]
+pub enum PermissionResponse {
+    /// Block persistently (stored).
+    Block,
+    /// Deny for this session only (in-memory).
+    DenySession,
+    /// Allow for this session only (in-memory).
+    AllowSession,
+    /// Allow persistently (stored).
+    AllowAlways,
+}
+
+/// How a pending permission request should be resolved.
+enum PermissionOutcome {
+    /// Grant automatically (stored grant or global "allow" default).
+    Allow,
+    /// Deny automatically (stored block or global "block" default).
+    Deny,
+    /// No stored decision and the default is "ask": show the prompt.
+    Prompt,
 }
 
 // ── Context menu ──────────────────────────────────────────────────────────────
@@ -251,12 +330,28 @@ pub enum Message {
     ClearBrowsingData,
     /// Clear all data (cookies, site storage, history) for a single site.
     ClearSiteData(String),
-    /// Allow the active tab's pending permission request.
-    PermissionAllow,
-    /// Deny the active tab's pending permission request.
-    PermissionDeny,
-    /// Revoke a previously granted permission (permissions popover).
-    PermissionRevoke(PermissionFeature),
+    /// Answer the active tab's pending permission request (prompt banner).
+    PermissionRespond(PermissionResponse),
+    /// Clear a permission decision for the active site (permissions popover).
+    /// `persistent` selects the stored decision; otherwise the session one.
+    PermissionClear {
+        key: String,
+        persistent: bool,
+    },
+    /// Per-site permission grants loaded from the database at startup.
+    SitePermissionsLoaded(Vec<SitePermission>),
+    /// Set the global default for a permission category (settings drawer).
+    SetPermissionDefault(PermissionKind, PermissionDefault),
+    /// Revoke a single stored per-site permission grant (settings drawer).
+    RevokeSitePermission(String, String),
+    /// Revoke every stored per-site permission grant (settings drawer).
+    ResetAllSitePermissions,
+    /// Toggle whether sites may use the camera and microphone (settings drawer).
+    SetAllowCameraMicrophone(bool),
+    /// User picked a Bluetooth device by index in the selection dialog.
+    BluetoothPick(usize),
+    /// User dismissed the Bluetooth device-selection dialog.
+    BluetoothCancel,
     // ── Awesomebar ────────────────────────────────────────────────────────────
     /// Suggestion list loaded from history + bookmarks for the current input.
     SuggestionsReady(Vec<Suggestion>),
@@ -416,6 +511,17 @@ pub struct App {
     site_data_domains: Vec<String>,
     /// True while the "Clear browsing data" confirmation dialog is shown.
     clear_confirm_open: bool,
+    // ── Permissions ────────────────────────────────────────────────────────────
+    /// Persisted per-site permission grants, keyed by `(domain, feature_key)`,
+    /// mapping to `true` for allow and `false` for block. Loaded at startup and
+    /// kept in sync with the `site_permissions` table for synchronous lookups.
+    site_permissions: HashMap<(String, String), bool>,
+    /// Sorted view of `site_permissions` for the settings list: `(domain,
+    /// feature_key, allow)`. Rebuilt whenever the grants change.
+    permission_grants: Vec<(String, String, bool)>,
+    /// Session-only permission decisions, keyed by `(domain, feature_key)`,
+    /// `true` = allow, `false` = deny. Not persisted; cleared on restart.
+    session_permissions: HashMap<(String, String), bool>,
 }
 
 /// Maps a key press to a browser action, implementing Firefox-compatible
@@ -537,9 +643,10 @@ impl App {
         tab.show_new_tab_page = false;
         // Per-site override is cleared until we hear back from the DB lookup.
         tab.cookie_protection_override = None;
-        // Granted permissions and any unanswered request belong to the old page.
-        tab.granted_permissions.clear();
+        // Any unanswered request belongs to the old page. Session permission
+        // decisions persist across navigations (they are keyed by domain).
         tab.pending_permission = None;
+        tab.pending_bluetooth = None;
         // Apply the global default filter while we wait for the DB lookup.
         tab.servo.set_content_filter(global_filter);
         tab.servo.navigate(url);
@@ -751,6 +858,142 @@ impl App {
         clear
             .chain(self.reload_history())
             .chain(self.reload_new_tab())
+    }
+
+    /// Answer a permission request for tab `id`: auto-allow/deny from a stored
+    /// grant or global default, or hold it for the prompt banner.
+    fn resolve_permission(
+        &mut self,
+        id: segmented_button::Entity,
+        request: cosmic_webview::PermissionRequest,
+        domain: Option<String>,
+    ) -> Option<Task<Message>> {
+        let feature = request.feature();
+        match self.permission_outcome(feature, domain.as_deref()) {
+            PermissionOutcome::Allow => request.allow(),
+            PermissionOutcome::Deny => request.deny(),
+            PermissionOutcome::Prompt => {
+                if let Some(tab) = self.tabs.data_mut::<TabState>(id) {
+                    tab.pending_permission = Some(request);
+                }
+            }
+        }
+        None
+    }
+
+    /// Decide the outcome for `feature` on `domain`: a stored per-site grant wins,
+    /// otherwise the global default (absent any default, prompt).
+    fn permission_outcome(
+        &self,
+        feature: PermissionFeature,
+        domain: Option<&str>,
+    ) -> PermissionOutcome {
+        let key = permission::feature_key(feature);
+        if let Some(domain) = domain {
+            let map_key = (domain.to_owned(), key.to_owned());
+            // A persistent decision wins; otherwise an in-session one applies.
+            if let Some(&allow) = self
+                .site_permissions
+                .get(&map_key)
+                .or_else(|| self.session_permissions.get(&map_key))
+            {
+                return if allow {
+                    PermissionOutcome::Allow
+                } else {
+                    PermissionOutcome::Deny
+                };
+            }
+        }
+        match permission_kind(feature).map(|kind| self.config.permission_defaults.get(kind)) {
+            Some(PermissionDefault::Allow) => PermissionOutcome::Allow,
+            Some(PermissionDefault::Block) => PermissionOutcome::Deny,
+            _ => PermissionOutcome::Prompt,
+        }
+    }
+
+    /// Remember a per-site permission decision in memory and persist it.
+    fn persist_permission(
+        &mut self,
+        domain: String,
+        feature: PermissionFeature,
+        allow: bool,
+    ) -> Task<Message> {
+        let key = permission::feature_key(feature).to_owned();
+        self.site_permissions
+            .insert((domain.clone(), key.clone()), allow);
+        self.rebuild_permission_grants();
+        let Some(conn) = self.db.clone() else {
+            return Task::none();
+        };
+        let decision = if allow { "allow" } else { "block" }.to_owned();
+        Task::perform(
+            async move {
+                if let Err(e) = crate::db::save_site_permission(conn, domain, key, decision).await {
+                    tracing::warn!("Failed to save site permission: {e}");
+                }
+            },
+            |_| libcosmic::action::app(Message::VisitLogged),
+        )
+    }
+
+    /// Rebuild the sorted display list of per-site permission grants.
+    fn rebuild_permission_grants(&mut self) {
+        let mut grants: Vec<(String, String, bool)> = self
+            .site_permissions
+            .iter()
+            .map(|((domain, key), allow)| (domain.clone(), key.clone(), *allow))
+            .collect();
+        grants.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        self.permission_grants = grants;
+    }
+
+    /// Forget a per-site permission grant in memory and the database.
+    fn forget_permission_key(&mut self, domain: String, key: String) -> Task<Message> {
+        self.site_permissions.remove(&(domain.clone(), key.clone()));
+        self.rebuild_permission_grants();
+        let Some(conn) = self.db.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                if let Err(e) = crate::db::delete_site_permission(conn, domain, key).await {
+                    tracing::warn!("Failed to delete site permission: {e}");
+                }
+            },
+            |_| libcosmic::action::app(Message::VisitLogged),
+        )
+    }
+
+    /// Permission decisions (persistent and session) for the active tab's domain,
+    /// shown in the URL-bar permissions popover. Sorted by label.
+    fn permission_entries(&self) -> Vec<url_bar::PermissionEntry> {
+        let Some(domain) = self.tabs.active_data::<TabState>().and_then(current_domain) else {
+            return Vec::new();
+        };
+        let label = |key: &str| permission::feature_label_from_key(key).unwrap_or("Permission");
+        let mut entries = Vec::new();
+        for ((d, key), &allowed) in &self.site_permissions {
+            if *d == domain {
+                entries.push(url_bar::PermissionEntry {
+                    key: key.clone(),
+                    label: label(key),
+                    allowed,
+                    persistent: true,
+                });
+            }
+        }
+        for ((d, key), &allowed) in &self.session_permissions {
+            if *d == domain {
+                entries.push(url_bar::PermissionEntry {
+                    key: key.clone(),
+                    label: label(key),
+                    allowed,
+                    persistent: false,
+                });
+            }
+        }
+        entries.sort_by(|a, b| a.label.cmp(b.label));
+        entries
     }
 
     /// Reload both data sources for the New Tab grid (top sites + pinned).
@@ -1110,6 +1353,9 @@ impl libcosmic::Application for App {
             .unwrap_or_default();
 
         cosmic_webview::set_profile_dir(crate::db::profile_dir());
+        // Apply the camera/microphone opt-in before the engine starts so it is in
+        // effect from the first page load.
+        cosmic_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
 
         let initial_size = PhysicalSize::new(1280u32, 800);
         // A command-line URL overrides the configured startup page.
@@ -1162,6 +1408,9 @@ impl libcosmic::Application for App {
             clear_cookies_checked: true,
             site_data_domains: Vec::new(),
             clear_confirm_open: false,
+            site_permissions: HashMap::new(),
+            permission_grants: Vec::new(),
+            session_permissions: HashMap::new(),
         };
 
         let db_task = Task::perform(
@@ -1227,7 +1476,7 @@ impl libcosmic::Application for App {
                     let is_active = self.tabs.is_active(id);
 
                     // Collect volatile state while holding the mutable borrow.
-                    let (title, dialog, crash) = {
+                    let (title, dialog, crash, permission) = {
                         let Some(tab) = self.tabs.data_mut::<TabState>(id) else {
                             continue;
                         };
@@ -1247,10 +1496,21 @@ impl libcosmic::Application for App {
                             tab.url_bar_text = url.to_string();
                         }
 
-                        // A page may ask for a permission (geolocation, camera, …);
-                        // hold it until the user answers via the prompt banner.
-                        if let Some(request) = tab.servo.take_permission_request() {
-                            tab.pending_permission = Some(request);
+                        // A page may ask for a permission (geolocation, camera, …).
+                        // Capture it with the requesting domain; the decision needs
+                        // `self`, so it is resolved after this borrow ends.
+                        let permission = tab.servo.take_permission_request().map(|request| {
+                            let domain = tab
+                                .servo
+                                .current_url()
+                                .and_then(|u| u.host_str().map(str::to_owned));
+                            (request, domain)
+                        });
+
+                        // A page may ask the user to pick a Bluetooth device; hold
+                        // the request until the picker dialog is answered.
+                        if let Some(request) = tab.servo.take_bluetooth_request() {
+                            tab.pending_bluetooth = Some(request);
                         }
 
                         let title = tab.servo.title();
@@ -1260,8 +1520,14 @@ impl libcosmic::Application for App {
                         // the next draw. See cosmic-webview's FrameSink.
 
                         let crash = tab.servo.take_crash();
-                        (title, dialog, crash)
+                        (title, dialog, crash, permission)
                     };
+
+                    if let Some((request, domain)) = permission
+                        && let Some(task) = self.resolve_permission(id, request, domain)
+                    {
+                        return task;
+                    }
 
                     if let Some(title) = title {
                         self.tabs.text_set(id, title.clone());
@@ -1860,36 +2126,112 @@ impl libcosmic::Application for App {
             }
             Message::ClearSiteData(domain) => return self.clear_site(domain),
 
-            Message::PermissionAllow => {
+            Message::PermissionRespond(response) => {
+                // Answer the engine, then record the choice (capture domain +
+                // feature inside the borrow, act afterwards).
+                let mut answered = None;
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>()
                     && let Some(request) = tab.pending_permission.take()
                 {
                     let feature = request.feature();
-                    if !tab
-                        .granted_permissions
-                        .iter()
-                        .any(|g| same_feature(*g, feature))
-                    {
-                        tab.granted_permissions.push(feature);
+                    match response {
+                        PermissionResponse::Block | PermissionResponse::DenySession => {
+                            request.deny()
+                        }
+                        PermissionResponse::AllowSession | PermissionResponse::AllowAlways => {
+                            request.allow()
+                        }
                     }
-                    request.allow();
+                    answered = current_domain(tab).map(|d| (d, feature));
+                }
+                let Some((domain, feature)) = answered else {
+                    return Task::none();
+                };
+                let key = permission::feature_key(feature).to_owned();
+                match response {
+                    // Persistent choices are stored; session choices stay in memory.
+                    PermissionResponse::AllowAlways => {
+                        return self.persist_permission(domain, feature, true);
+                    }
+                    PermissionResponse::Block => {
+                        return self.persist_permission(domain, feature, false);
+                    }
+                    PermissionResponse::AllowSession => {
+                        self.session_permissions.insert((domain, key), true);
+                    }
+                    PermissionResponse::DenySession => {
+                        self.session_permissions.insert((domain, key), false);
+                    }
                 }
             }
-            Message::PermissionDeny => {
-                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
-                    && let Some(request) = tab.pending_permission.take()
-                {
-                    request.deny();
-                }
-            }
-            Message::PermissionRevoke(feature) => {
-                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
-                    // We can only drop our own record; Servo exposes no way to
-                    // rescind a grant it already made.
-                    tab.granted_permissions
-                        .retain(|g| !same_feature(*g, feature));
-                }
+            Message::PermissionClear { key, persistent } => {
                 self.url_bar_popover = None;
+                let domain = self.tabs.active_data::<TabState>().and_then(current_domain);
+                if let Some(domain) = domain {
+                    if persistent {
+                        return self.forget_permission_key(domain, key);
+                    }
+                    self.session_permissions.remove(&(domain, key));
+                }
+            }
+            Message::SitePermissionsLoaded(entries) => {
+                self.site_permissions = entries
+                    .into_iter()
+                    .map(|e| ((e.domain, e.feature), e.decision == "allow"))
+                    .collect();
+                self.rebuild_permission_grants();
+            }
+            Message::SetPermissionDefault(kind, value) => {
+                self.write_config(|c, h| {
+                    let mut defaults = c.permission_defaults;
+                    defaults.set(kind, value);
+                    c.set_permission_defaults(h, defaults)
+                });
+            }
+            Message::RevokeSitePermission(domain, key) => {
+                return self.forget_permission_key(domain, key);
+            }
+            Message::SetAllowCameraMicrophone(on) => {
+                self.write_config(|c, h| c.set_allow_camera_microphone(h, on));
+                // Update the running engine; takes effect on the next page load.
+                cosmic_webview::set_camera_microphone_enabled(on);
+            }
+            Message::BluetoothPick(index) => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Some(request) = tab.pending_bluetooth.take()
+                {
+                    // Clone the chosen device so the borrow ends before the
+                    // consuming `pick_device` call.
+                    match request.devices().get(index).cloned() {
+                        Some(device) => {
+                            let _ = request.pick_device(&device);
+                        }
+                        None => {
+                            let _ = request.cancel();
+                        }
+                    }
+                }
+            }
+            Message::BluetoothCancel => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Some(request) = tab.pending_bluetooth.take()
+                {
+                    let _ = request.cancel();
+                }
+            }
+            Message::ResetAllSitePermissions => {
+                self.site_permissions.clear();
+                self.permission_grants.clear();
+                if let Some(conn) = self.db.clone() {
+                    return Task::perform(
+                        async move {
+                            if let Err(e) = crate::db::clear_all_site_permissions(conn).await {
+                                tracing::warn!("Failed to clear site permissions: {e}");
+                            }
+                        },
+                        |_| libcosmic::action::app(Message::VisitLogged),
+                    );
+                }
             }
 
             // ── Filter engine ─────────────────────────────────────────────────
@@ -1966,7 +2308,10 @@ impl libcosmic::Application for App {
             Message::DatabaseReady(conn) => {
                 self.db = Some(conn.clone());
                 let init_bookmarks = Task::perform(
-                    async move { crate::db::load_bookmarked_urls(conn).await },
+                    {
+                        let conn = conn.clone();
+                        async move { crate::db::load_bookmarked_urls(conn).await }
+                    },
                     |result| match result {
                         Ok(urls) => libcosmic::action::app(Message::BookmarksInitialized(urls)),
                         Err(e) => {
@@ -1975,7 +2320,23 @@ impl libcosmic::Application for App {
                         }
                     },
                 );
-                return Task::batch(vec![init_bookmarks, self.reload_new_tab()]);
+                let init_permissions = Task::perform(
+                    async move { crate::db::query_site_permissions(conn).await },
+                    |result| match result {
+                        Ok(entries) => {
+                            libcosmic::action::app(Message::SitePermissionsLoaded(entries))
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load site permissions: {e}");
+                            libcosmic::action::app(Message::SitePermissionsLoaded(vec![]))
+                        }
+                    },
+                );
+                return Task::batch(vec![
+                    init_bookmarks,
+                    init_permissions,
+                    self.reload_new_tab(),
+                ]);
             }
 
             Message::DatabaseFailed(reason) => {
@@ -2195,6 +2556,11 @@ impl libcosmic::Application for App {
                         cookies_checked: self.clear_cookies_checked,
                         site_domains: &self.site_data_domains,
                     },
+                    pages::settings::Permissions {
+                        defaults: &self.config.permission_defaults,
+                        grants: &self.permission_grants,
+                        allow_camera_microphone: self.config.allow_camera_microphone,
+                    },
                 ),
                 Message::SettingsClose,
             )
@@ -2249,6 +2615,13 @@ impl libcosmic::Application for App {
             return Some(dialog.into());
         }
 
+        // A page may ask the user to choose a Bluetooth device.
+        if let Some(tab) = self.tabs.active_data::<TabState>()
+            && let Some(request) = &tab.pending_bluetooth
+        {
+            return Some(bluetooth_dialog(request.devices()));
+        }
+
         self.tabs
             .active_data::<TabState>()?
             .servo
@@ -2294,7 +2667,7 @@ impl libcosmic::Application for App {
             security: SecurityStatus::from_url(&current_url),
             cookie_override: tab.cookie_protection_override,
             global_cookie_level: self.config.cookie_protection,
-            permissions: &tab.granted_permissions,
+            permissions: self.permission_entries(),
             is_bookmarked: self.bookmarked_urls.contains(&current_url),
             zoom: tab.servo.page_zoom(),
             open_popover: self.url_bar_popover,
