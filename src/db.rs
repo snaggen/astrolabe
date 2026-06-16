@@ -178,6 +178,62 @@ pub async fn delete_history_entry(conn: Connection, id: i64) -> anyhow::Result<(
     Ok(())
 }
 
+/// Delete browsing and search history.
+///
+/// `within_seconds` clears only entries from the last N seconds (e.g. one hour);
+/// `None` clears the entire history.
+pub async fn clear_history(conn: Connection, within_seconds: Option<i64>) -> anyhow::Result<()> {
+    match within_seconds {
+        Some(secs) => {
+            conn.execute(
+                "DELETE FROM history WHERE last_visited >= unixepoch() - ?1",
+                (secs,),
+            )
+            .await?;
+            conn.execute(
+                "DELETE FROM search_history WHERE last_searched >= unixepoch() - ?1",
+                (secs,),
+            )
+            .await?;
+        }
+        None => {
+            conn.execute("DELETE FROM history", ()).await?;
+            conn.execute("DELETE FROM search_history", ()).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Delete every history entry whose URL host equals `domain` or is a subdomain
+/// of it. Host matching is done in Rust because the URL host is not a column.
+pub async fn clear_history_for_domain(conn: Connection, domain: String) -> anyhow::Result<()> {
+    let mut rows = conn.query("SELECT id, url FROM history", ()).await?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let id: i64 = row.get(0)?;
+        let url: String = row.get(1)?;
+        if url_host_matches(&url, &domain) {
+            ids.push(id);
+        }
+    }
+    for id in ids {
+        conn.execute("DELETE FROM history WHERE id = ?1", (id,))
+            .await?;
+    }
+    Ok(())
+}
+
+/// True when `url`'s host equals `domain` or is a subdomain of it.
+fn url_host_matches(url: &str, domain: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host_str() {
+        Some(host) => host == domain || host.ends_with(&format!(".{domain}")),
+        None => false,
+    }
+}
+
 // ── Awesomebar suggestions ────────────────────────────────────────────────────
 
 /// Source of an awesomebar suggestion.
@@ -570,6 +626,57 @@ mod tests {
             let conn = temp_db().await?;
             init_schema(&conn).await?;
             init_schema(&conn).await?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn host_matching_covers_subdomains_only() {
+        assert!(url_host_matches("https://example.com/path", "example.com"));
+        assert!(url_host_matches("https://www.example.com/", "example.com"));
+        assert!(url_host_matches("http://a.b.example.com", "example.com"));
+        // A different registrable domain that merely ends in the same letters
+        // must not match.
+        assert!(!url_host_matches("https://notexample.com/", "example.com"));
+        assert!(!url_host_matches("https://example.org/", "example.com"));
+        assert!(!url_host_matches("not a url", "example.com"));
+    }
+
+    #[test]
+    fn clear_history_all_empties_history_and_search() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            let conn = temp_db().await?;
+            log_visit(conn.clone(), "https://a.example/".into(), "A".into()).await?;
+            log_search_query(conn.clone(), "rust".into()).await?;
+
+            clear_history(conn.clone(), None).await?;
+
+            assert!(
+                query_history(conn.clone(), String::new(), HistorySort::default(), 10)
+                    .await?
+                    .is_empty()
+            );
+            let mut rows = conn
+                .query("SELECT COUNT(*) FROM search_history", ())
+                .await?;
+            let count: i64 = rows.next().await?.expect("count row").get(0)?;
+            assert_eq!(count, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn clear_history_for_domain_keeps_other_sites() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            let conn = temp_db().await?;
+            log_visit(conn.clone(), "https://www.target.com/a".into(), "T".into()).await?;
+            log_visit(conn.clone(), "https://keep.com/b".into(), "K".into()).await?;
+
+            clear_history_for_domain(conn.clone(), "target.com".into()).await?;
+
+            let remaining = query_history(conn, String::new(), HistorySort::default(), 10).await?;
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].url, "https://keep.com/b");
             Ok(())
         })
     }

@@ -19,8 +19,8 @@ use turso::Connection;
 use url::Url;
 
 use crate::config::{
-    BUILTIN_ENGINES, BrowserConfig, CookieProtectionLevel, FilterListEntry, SearchEngine,
-    StartupPage, extract_search_query,
+    BUILTIN_ENGINES, BrowserConfig, ClearRange, CookieProtectionLevel, FilterListEntry,
+    SearchEngine, StartupPage, extract_search_query,
 };
 use crate::db::{BookmarkEntry, HistoryEntry, HistorySort, Suggestion, SuggestionKind};
 use crate::filter_engine::FilterEngines;
@@ -236,6 +236,21 @@ pub enum Message {
     /// Set the active tab's per-site cookie-protection override (URL-bar popover).
     /// `None` removes the override, restoring the global default.
     SetCookieProtectionOverride(Option<CookieProtectionLevel>),
+    // ── Data clearing (settings drawer) ─────────────────────────────────────────
+    /// Set the time range the "Clear browsing data" action applies to (history only).
+    SetClearRange(ClearRange),
+    /// Toggle whether browsing history is included when clearing data.
+    ToggleClearHistory(bool),
+    /// Toggle whether cookies and site data are included when clearing data.
+    ToggleClearCookies(bool),
+    /// Ask for confirmation before clearing data (opens the confirmation dialog).
+    RequestClearData,
+    /// Dismiss the clear-data confirmation dialog without clearing.
+    CancelClearData,
+    /// Clear the selected data categories for the selected time range (confirmed).
+    ClearBrowsingData,
+    /// Clear all data (cookies, site storage, history) for a single site.
+    ClearSiteData(String),
     /// Allow the active tab's pending permission request.
     PermissionAllow,
     /// Deny the active tab's pending permission request.
@@ -389,6 +404,18 @@ pub struct App {
     filter_engines: Option<std::sync::Arc<FilterEngines>>,
     /// Text being entered for a new custom filter list URL.
     custom_filter_list_url: String,
+    // ── Data clearing ──────────────────────────────────────────────────────────
+    /// Time range the "Clear browsing data" action applies to (history only).
+    clear_range: ClearRange,
+    /// Whether the clear action includes browsing history.
+    clear_history_checked: bool,
+    /// Whether the clear action includes cookies and site data.
+    clear_cookies_checked: bool,
+    /// Domains that currently hold cookies or web storage, shown for per-site
+    /// clearing. Refreshed when the settings drawer opens and after each clear.
+    site_data_domains: Vec<String>,
+    /// True while the "Clear browsing data" confirmation dialog is shown.
+    clear_confirm_open: bool,
 }
 
 /// Maps a key press to a browser action, implementing Firefox-compatible
@@ -660,6 +687,70 @@ impl App {
                 }
             },
         )
+    }
+
+    /// Refresh the list of domains that hold cookies or web storage, shown for
+    /// per-site clearing in the settings drawer.
+    fn refresh_site_data_domains(&mut self) {
+        let mut domains: Vec<String> = cosmic_webview::list_site_data()
+            .iter()
+            .map(|site| site.name())
+            .collect();
+        domains.sort();
+        domains.dedup();
+        self.site_data_domains = domains;
+    }
+
+    /// Clear the selected data categories for the selected time range.
+    ///
+    /// Cookies and web storage have no time filter in Servo, so they are always
+    /// cleared in full; only history honours [`App::clear_range`].
+    fn clear_browsing_data(&mut self) -> Task<Message> {
+        if self.clear_cookies_checked {
+            cosmic_webview::clear_all_cookies();
+            let domains: Vec<&str> = self.site_data_domains.iter().map(String::as_str).collect();
+            cosmic_webview::clear_site_data(&domains);
+            self.refresh_site_data_domains();
+        }
+
+        if !self.clear_history_checked {
+            return Task::none();
+        }
+        let Some(conn) = self.db.clone() else {
+            return Task::none();
+        };
+        let within = self.clear_range.within_seconds();
+        let clear = Task::perform(
+            async move {
+                if let Err(e) = crate::db::clear_history(conn, within).await {
+                    tracing::warn!("Failed to clear history: {e}");
+                }
+            },
+            |_| libcosmic::action::app(Message::VisitLogged),
+        );
+        clear
+            .chain(self.reload_history())
+            .chain(self.reload_new_tab())
+    }
+
+    /// Clear cookies, web storage, and history for a single site.
+    fn clear_site(&mut self, domain: String) -> Task<Message> {
+        cosmic_webview::clear_site_data(&[domain.as_str()]);
+        self.refresh_site_data_domains();
+        let Some(conn) = self.db.clone() else {
+            return Task::none();
+        };
+        let clear = Task::perform(
+            async move {
+                if let Err(e) = crate::db::clear_history_for_domain(conn, domain).await {
+                    tracing::warn!("Failed to clear site history: {e}");
+                }
+            },
+            |_| libcosmic::action::app(Message::VisitLogged),
+        );
+        clear
+            .chain(self.reload_history())
+            .chain(self.reload_new_tab())
     }
 
     /// Reload both data sources for the New Tab grid (top sites + pinned).
@@ -1066,6 +1157,11 @@ impl libcosmic::Application for App {
             url_bar_popover: None,
             filter_engines: None,
             custom_filter_list_url: String::new(),
+            clear_range: ClearRange::default(),
+            clear_history_checked: true,
+            clear_cookies_checked: true,
+            site_data_domains: Vec::new(),
+            clear_confirm_open: false,
         };
 
         let db_task = Task::perform(
@@ -1653,6 +1749,7 @@ impl libcosmic::Application for App {
                 if self.core().window.show_context && self.context_page == ContextPage::Settings {
                     self.core_mut().set_show_context(false);
                 } else {
+                    self.refresh_site_data_domains();
                     self.context_page = ContextPage::Settings;
                     self.core_mut().set_show_context(true);
                 }
@@ -1751,6 +1848,18 @@ impl libcosmic::Application for App {
                     );
                 }
             }
+            // ── Data clearing ───────────────────────────────────────────────────
+            Message::SetClearRange(range) => self.clear_range = range,
+            Message::ToggleClearHistory(on) => self.clear_history_checked = on,
+            Message::ToggleClearCookies(on) => self.clear_cookies_checked = on,
+            Message::RequestClearData => self.clear_confirm_open = true,
+            Message::CancelClearData => self.clear_confirm_open = false,
+            Message::ClearBrowsingData => {
+                self.clear_confirm_open = false;
+                return self.clear_browsing_data();
+            }
+            Message::ClearSiteData(domain) => return self.clear_site(domain),
+
             Message::PermissionAllow => {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>()
                     && let Some(request) = tab.pending_permission.take()
@@ -2077,7 +2186,16 @@ impl libcosmic::Application for App {
             )
             .title("Bookmarks"),
             ContextPage::Settings => context_drawer::context_drawer(
-                pages::settings::view(&self.config, &self.custom_filter_list_url),
+                pages::settings::view(
+                    &self.config,
+                    &self.custom_filter_list_url,
+                    pages::settings::DataClearing {
+                        range: self.clear_range,
+                        history_checked: self.clear_history_checked,
+                        cookies_checked: self.clear_cookies_checked,
+                        site_domains: &self.site_data_domains,
+                    },
+                ),
                 Message::SettingsClose,
             )
             .title("Settings"),
@@ -2114,6 +2232,23 @@ impl libcosmic::Application for App {
     }
 
     fn dialog(&self) -> Option<Element<'_, Message>> {
+        // The clear-data confirmation takes priority over any page dialog.
+        if self.clear_confirm_open {
+            let dialog = widget::dialog()
+                .title("Clear browsing data?")
+                .body(
+                    "This permanently deletes the selected browsing data. \
+                     This can't be undone.",
+                )
+                .primary_action(
+                    widget::button::destructive("Clear").on_press(Message::ClearBrowsingData),
+                )
+                .secondary_action(
+                    widget::button::standard("Cancel").on_press(Message::CancelClearData),
+                );
+            return Some(dialog.into());
+        }
+
         self.tabs
             .active_data::<TabState>()?
             .servo

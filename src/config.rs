@@ -171,6 +171,53 @@ impl CookieProtectionLevel {
     }
 }
 
+/// Time range for the "Clear browsing data" action. Only history is filtered by
+/// range; cookies and site data are always cleared in full (Servo's engine has no
+/// time-based cookie filter).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClearRange {
+    LastHour,
+    LastDay,
+    LastWeek,
+    LastMonth,
+    #[default]
+    AllTime,
+}
+
+impl ClearRange {
+    /// Human-readable label shown in the range dropdown.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::LastHour => "Last hour",
+            Self::LastDay => "Last 24 hours",
+            Self::LastWeek => "Last 7 days",
+            Self::LastMonth => "Last 4 weeks",
+            Self::AllTime => "All time",
+        }
+    }
+
+    /// Number of seconds the range covers, or `None` for "all time".
+    pub fn within_seconds(&self) -> Option<i64> {
+        let day = 24 * 60 * 60;
+        match self {
+            Self::LastHour => Some(60 * 60),
+            Self::LastDay => Some(day),
+            Self::LastWeek => Some(7 * day),
+            Self::LastMonth => Some(28 * day),
+            Self::AllTime => None,
+        }
+    }
+
+    /// All variants in dropdown order.
+    pub const ALL: [ClearRange; 5] = [
+        Self::LastHour,
+        Self::LastDay,
+        Self::LastWeek,
+        Self::LastMonth,
+        Self::AllTime,
+    ];
+}
+
 /// A user-configured filter list (URL and metadata).
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FilterListEntry {

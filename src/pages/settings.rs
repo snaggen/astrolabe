@@ -3,7 +3,7 @@ use libcosmic::prelude::*;
 use libcosmic::widget;
 
 use crate::app::Message;
-use crate::config::{BrowserConfig, CookieProtectionLevel, StartupPage};
+use crate::config::{BrowserConfig, ClearRange, CookieProtectionLevel, StartupPage};
 
 /// Selectable column counts for the New Tab grid.
 const COLUMN_CHOICES: &[u16] = &[3, 4, 5, 6, 7, 8];
@@ -17,8 +17,24 @@ const COOKIE_LEVELS: &[CookieProtectionLevel] = &[
     CookieProtectionLevel::Strict,
 ];
 
+/// State for the "Clear browsing data" settings section.
+pub struct DataClearing<'a> {
+    /// Selected time range (applies to history only).
+    pub range: ClearRange,
+    /// Whether browsing history is included in the clear action.
+    pub history_checked: bool,
+    /// Whether cookies and site data are included in the clear action.
+    pub cookies_checked: bool,
+    /// Domains that currently hold cookies or web storage, for per-site clearing.
+    pub site_domains: &'a [String],
+}
+
 /// Settings drawer content: New Tab grid size, privacy settings, and filter lists.
-pub fn view<'a>(config: &'a BrowserConfig, filter_list_url: &'a str) -> Element<'a, Message> {
+pub fn view<'a>(
+    config: &'a BrowserConfig,
+    filter_list_url: &'a str,
+    clearing: DataClearing<'a>,
+) -> Element<'a, Message> {
     let columns = number_row(
         "Grid columns",
         COLUMN_CHOICES,
@@ -127,7 +143,76 @@ pub fn view<'a>(config: &'a BrowserConfig, filter_list_url: &'a str) -> Element<
         .push(cookie_row)
         .push(widget::text::caption(cookie_description))
         .push(filter_section)
+        .push(data_clearing_section(clearing))
         .into()
+}
+
+/// Build the "Clear browsing data" section: a time-range dropdown, category
+/// toggles, a clear button, and a per-site list.
+fn data_clearing_section(clearing: DataClearing<'_>) -> Element<'_, Message> {
+    let spacing = libcosmic::theme::spacing();
+    let range_selected = ClearRange::ALL.iter().position(|&r| r == clearing.range);
+    let range_labels: Vec<&str> = ClearRange::ALL.iter().map(ClearRange::label).collect();
+    let range_row = widget::row::with_capacity(2)
+        .push(widget::text("Time range").width(Length::Fill))
+        .push(widget::dropdown(range_labels, range_selected, |i| {
+            Message::SetClearRange(ClearRange::ALL.get(i).copied().unwrap_or_default())
+        }))
+        .align_y(Alignment::Center);
+
+    let history_toggle = widget::row::with_capacity(2)
+        .push(widget::text("Browsing history").width(Length::Fill))
+        .push(widget::toggler(clearing.history_checked).on_toggle(Message::ToggleClearHistory))
+        .align_y(Alignment::Center);
+    let cookies_toggle = widget::row::with_capacity(2)
+        .push(widget::text("Cookies and site data").width(Length::Fill))
+        .push(widget::toggler(clearing.cookies_checked).on_toggle(Message::ToggleClearCookies))
+        .align_y(Alignment::Center);
+
+    // Cookies and site data have no time filter in the engine; only history obeys
+    // the selected range. Make that explicit so the control is not misleading.
+    let range_note = widget::text::caption(
+        "The time range applies to history only; cookies are cleared in full.",
+    );
+
+    let can_clear = clearing.history_checked || clearing.cookies_checked;
+    // Clearing is irreversible, so it is a destructive action and is confirmed via
+    // a dialog before anything is deleted (see `App::dialog`).
+    let clear_button = widget::button::destructive("Clear now")
+        .on_press_maybe(can_clear.then_some(Message::RequestClearData));
+
+    let mut section = widget::column::with_capacity(7)
+        .push(widget::text::title4("Clear browsing data"))
+        .push(range_row)
+        .push(history_toggle)
+        .push(cookies_toggle)
+        .push(range_note)
+        .push(clear_button)
+        .spacing(spacing.space_xxs);
+
+    if !clearing.site_domains.is_empty() {
+        section = section
+            .push(widget::text::heading("Sites with stored data"))
+            .push(widget::text::caption(
+                "Remove cookies, site storage, and history for a single site.",
+            ));
+        for domain in clearing.site_domains {
+            let remove = widget::tooltip(
+                widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
+                    .on_press(Message::ClearSiteData(domain.clone())),
+                widget::text::body("Clear data for this site"),
+                widget::tooltip::Position::Left,
+            );
+            let row = widget::row::with_capacity(2)
+                .push(widget::text(domain.as_str()).width(Length::Fill))
+                .push(remove)
+                .align_y(Alignment::Center)
+                .spacing(spacing.space_xxs);
+            section = section.push(row);
+        }
+    }
+
+    section.into()
 }
 
 /// A labeled dropdown of integer choices that emits `on_change(value)`.
