@@ -32,7 +32,7 @@ fn entry_row<'a>(entry: &'a BookmarkEntry) -> Element<'a, Message> {
 
     let info = widget::column::with_capacity(2)
         .push(widget::text(title).width(Length::Fill))
-        .push(widget::text(&entry.url).size(12).width(Length::Fill))
+        .push(widget::text::caption(entry.url.as_str()).width(Length::Fill))
         .width(Length::Fill);
 
     let del = widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))

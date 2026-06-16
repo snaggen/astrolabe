@@ -551,7 +551,7 @@ fn suggestion_row<'a>(index: usize, s: &'a Suggestion, selected: bool) -> Elemen
     } else {
         widget::column::with_capacity(2)
             .push(widget::text(title).width(Length::Fill))
-            .push(widget::text(&s.url).size(12).width(Length::Fill))
+            .push(widget::text::caption(s.url.as_str()).width(Length::Fill))
             .width(Length::Fill)
             .into()
     };

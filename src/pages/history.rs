@@ -53,7 +53,7 @@ fn entry_row<'a>(entry: &'a HistoryEntry) -> Element<'a, Message> {
     let subtitle = format!("{} — {} visits", entry.url, entry.visit_count);
     let info = widget::column::with_capacity(2)
         .push(widget::text(title).width(Length::Fill))
-        .push(widget::text(subtitle).size(12).width(Length::Fill))
+        .push(widget::text::caption(subtitle).width(Length::Fill))
         .width(Length::Fill);
 
     let del = widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))

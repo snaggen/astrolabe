@@ -159,6 +159,84 @@ pub fn view<'a>(
         .push(filter_section)
         .push(data_clearing_section(clearing))
         .push(permissions_section(permissions))
+        .push(fonts_section(config))
+        .into()
+}
+
+/// Selectable web-content font sizes, in pixels.
+const FONT_SIZES: &[u16] = &[12, 13, 14, 15, 16, 18, 20, 24];
+
+/// A labeled text input for a web-content font family. Empty means "default".
+fn font_family_row<'a>(
+    label: &'static str,
+    value: &'a str,
+    on_input: fn(String) -> Message,
+) -> Element<'a, Message> {
+    widget::row::with_capacity(2)
+        .push(widget::text(label).width(Length::Fill))
+        .push(
+            widget::text_input("Default", value)
+                .on_input(on_input)
+                // Apply on Enter; per-keystroke reloads would be disruptive.
+                .on_submit(|_| Message::ApplyWebFonts)
+                .width(Length::Fixed(180.0)),
+        )
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// A labeled dropdown for a web-content font size.
+fn font_size_row<'a>(
+    label: &'static str,
+    value: u16,
+    on_change: fn(u16) -> Message,
+) -> Element<'a, Message> {
+    let labels: Vec<String> = FONT_SIZES.iter().map(u16::to_string).collect();
+    let selected = FONT_SIZES.iter().position(|&s| s == value);
+    widget::row::with_capacity(2)
+        .push(widget::text(label).width(Length::Fill))
+        .push(widget::dropdown(labels, selected, move |i| {
+            on_change(FONT_SIZES.get(i).copied().unwrap_or(value))
+        }))
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// Build the "Fonts" section: default serif/sans-serif/monospace families and
+/// base sizes for web content (like a browser's font settings).
+fn fonts_section(config: &BrowserConfig) -> Element<'_, Message> {
+    let spacing = libcosmic::theme::spacing();
+    widget::column::with_capacity(7)
+        .push(widget::text::title4("Fonts"))
+        .push(widget::text::caption(
+            "Default fonts for web pages. Leave a family blank to use the engine default.",
+        ))
+        .push(font_family_row(
+            "Serif",
+            &config.web_font_serif,
+            Message::SetWebFontSerif,
+        ))
+        .push(font_family_row(
+            "Sans-serif",
+            &config.web_font_sans_serif,
+            Message::SetWebFontSansSerif,
+        ))
+        .push(font_family_row(
+            "Monospace",
+            &config.web_font_monospace,
+            Message::SetWebFontMonospace,
+        ))
+        .push(font_size_row(
+            "Size",
+            config.web_font_size,
+            Message::SetWebFontSize,
+        ))
+        .push(font_size_row(
+            "Monospace size",
+            config.web_font_monospace_size,
+            Message::SetWebFontMonospaceSize,
+        ))
+        .spacing(spacing.space_xxs)
         .into()
 }
 

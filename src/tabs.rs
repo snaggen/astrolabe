@@ -35,6 +35,9 @@ pub struct TabState {
     /// A Bluetooth device-selection request from the page awaiting the user's
     /// choice. Shown as a picker dialog; a newer request replaces an unanswered one.
     pub pending_bluetooth: Option<BluetoothDeviceSelectionRequest>,
+    /// Set when an engine-level change (e.g. web fonts) needs this tab reloaded,
+    /// deferred until the tab becomes visible to avoid reloading every tab at once.
+    pub needs_reload: bool,
 }
 
 impl TabState {
@@ -53,6 +56,7 @@ impl TabState {
                 cookie_protection_override: None,
                 pending_permission: None,
                 pending_bluetooth: None,
+                needs_reload: false,
             },
             rx,
         )

@@ -120,7 +120,7 @@ fn site_cell<'a>(
 
     let body = widget::column::with_capacity(2)
         .push(thumb)
-        .push(widget::text(label.clone()).size(12))
+        .push(widget::text::caption(label.clone()))
         .spacing(6)
         .align_x(Alignment::Center)
         .width(Length::Fixed(CELL_WIDTH));

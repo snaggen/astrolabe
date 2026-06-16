@@ -350,6 +350,16 @@ pub struct BrowserConfig {
     /// Whether sites may use the camera and microphone. Off by default because
     /// Servo grants `getUserMedia` without a per-site prompt.
     pub allow_camera_microphone: bool,
+    /// Default serif font for web content; empty uses the engine default.
+    pub web_font_serif: String,
+    /// Default sans-serif font for web content; empty uses the engine default.
+    pub web_font_sans_serif: String,
+    /// Default monospace font for web content; empty uses the engine default.
+    pub web_font_monospace: String,
+    /// Default web-content font size in pixels.
+    pub web_font_size: u16,
+    /// Default web-content monospace font size in pixels.
+    pub web_font_monospace_size: u16,
 }
 
 impl Default for BrowserConfig {
@@ -365,6 +375,24 @@ impl Default for BrowserConfig {
             custom_filter_lists: Vec::new(),
             permission_defaults: PermissionDefaults::default(),
             allow_camera_microphone: false,
+            web_font_serif: String::new(),
+            web_font_sans_serif: String::new(),
+            web_font_monospace: String::new(),
+            web_font_size: 16,
+            web_font_monospace_size: 13,
+        }
+    }
+}
+
+impl BrowserConfig {
+    /// Build the engine's web-font configuration from these settings.
+    pub fn web_fonts(&self) -> cosmic_webview::WebFonts {
+        cosmic_webview::WebFonts {
+            serif: self.web_font_serif.clone(),
+            sans_serif: self.web_font_sans_serif.clone(),
+            monospace: self.web_font_monospace.clone(),
+            default_size: i64::from(self.web_font_size),
+            monospace_size: i64::from(self.web_font_monospace_size),
         }
     }
 }

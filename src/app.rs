@@ -348,6 +348,19 @@ pub enum Message {
     ResetAllSitePermissions,
     /// Toggle whether sites may use the camera and microphone (settings drawer).
     SetAllowCameraMicrophone(bool),
+    // ── Web fonts (settings drawer) ─────────────────────────────────────────────
+    /// Set the default serif font family for web content.
+    SetWebFontSerif(String),
+    /// Set the default sans-serif font family for web content.
+    SetWebFontSansSerif(String),
+    /// Set the default monospace font family for web content.
+    SetWebFontMonospace(String),
+    /// Set the default web-content font size, in pixels.
+    SetWebFontSize(u16),
+    /// Set the default web-content monospace font size, in pixels.
+    SetWebFontMonospaceSize(u16),
+    /// Reload all tabs so changed web fonts apply to already-loaded pages.
+    ApplyWebFonts,
     /// User picked a Bluetooth device by index in the selection dialog.
     BluetoothPick(usize),
     /// User dismissed the Bluetooth device-selection dialog.
@@ -697,8 +710,14 @@ impl App {
         let ids: Vec<_> = self.tabs.iter().collect();
         for id in ids {
             let is_active = self.tabs.is_active(id);
-            if let Some(tab) = self.tabs.data::<TabState>(id) {
+            if let Some(tab) = self.tabs.data_mut::<TabState>(id) {
                 tab.servo.set_visible(is_active);
+                // Apply a deferred reload (e.g. web-font change) now that the
+                // tab is the visible one.
+                if is_active && tab.needs_reload {
+                    tab.servo.reload();
+                    tab.needs_reload = false;
+                }
             }
         }
     }
@@ -1177,6 +1196,29 @@ impl App {
         }
     }
 
+    /// Push the current web-font settings into the engine (next page load).
+    fn apply_web_fonts(&self) {
+        cosmic_webview::set_web_fonts(self.config.web_fonts());
+    }
+
+    /// Apply an engine-level change (e.g. fonts) to existing pages: reload the
+    /// active tab now and flag the rest to reload lazily when next shown, so we
+    /// never reload many background tabs at once.
+    fn reload_active_flag_others(&mut self) {
+        let ids: Vec<_> = self.tabs.iter().collect();
+        for id in ids {
+            let is_active = self.tabs.is_active(id);
+            if let Some(tab) = self.tabs.data_mut::<TabState>(id) {
+                if is_active {
+                    tab.servo.reload();
+                    tab.needs_reload = false;
+                } else {
+                    tab.needs_reload = true;
+                }
+            }
+        }
+    }
+
     /// Returns the effective cookie-protection level for a tab.
     fn effective_level(&self, tab: &crate::tabs::TabState) -> CookieProtectionLevel {
         tab.cookie_protection_override
@@ -1356,6 +1398,8 @@ impl libcosmic::Application for App {
         // Apply the camera/microphone opt-in before the engine starts so it is in
         // effect from the first page load.
         cosmic_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
+        // Apply web-content fonts before the engine starts.
+        cosmic_webview::set_web_fonts(config.web_fonts());
 
         let initial_size = PhysicalSize::new(1280u32, 800);
         // A command-line URL overrides the configured startup page.
@@ -2196,6 +2240,29 @@ impl libcosmic::Application for App {
                 // Update the running engine; takes effect on the next page load.
                 cosmic_webview::set_camera_microphone_enabled(on);
             }
+            Message::SetWebFontSerif(family) => {
+                self.write_config(|c, h| c.set_web_font_serif(h, family));
+                self.apply_web_fonts();
+            }
+            Message::SetWebFontSansSerif(family) => {
+                self.write_config(|c, h| c.set_web_font_sans_serif(h, family));
+                self.apply_web_fonts();
+            }
+            Message::SetWebFontMonospace(family) => {
+                self.write_config(|c, h| c.set_web_font_monospace(h, family));
+                self.apply_web_fonts();
+            }
+            Message::SetWebFontSize(size) => {
+                self.write_config(|c, h| c.set_web_font_size(h, size));
+                self.apply_web_fonts();
+                self.reload_active_flag_others();
+            }
+            Message::SetWebFontMonospaceSize(size) => {
+                self.write_config(|c, h| c.set_web_font_monospace_size(h, size));
+                self.apply_web_fonts();
+                self.reload_active_flag_others();
+            }
+            Message::ApplyWebFonts => self.reload_active_flag_others(),
             Message::BluetoothPick(index) => {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>()
                     && let Some(request) = tab.pending_bluetooth.take()
