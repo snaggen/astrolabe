@@ -1,3 +1,4 @@
+use libcosmic::iced::alignment::Horizontal;
 use libcosmic::iced::{Alignment, Length};
 use libcosmic::prelude::*;
 use libcosmic::widget;
@@ -11,6 +12,7 @@ pub fn view<'a>(
     filter: &'a str,
     sort: HistorySort,
 ) -> Element<'a, Message> {
+    let spacing = libcosmic::theme::spacing();
     let filter_input = widget::text_input("Search history…", filter)
         .on_input(Message::HistoryFilterChanged)
         .width(Length::Fill);
@@ -28,22 +30,44 @@ pub fn view<'a>(
                     .then_some(Message::HistorySortChanged(HistorySort::MostVisited)),
             ),
         )
-        .spacing(8);
+        .spacing(spacing.space_xxs);
 
-    let entry_list = entries.iter().fold(widget::list_column(), |list, entry| {
-        list.add(entry_row(entry))
-    });
+    let content: Element<'a, Message> = if entries.is_empty() {
+        let message = if filter.trim().is_empty() {
+            "No history yet"
+        } else {
+            "No matching history"
+        };
+        empty_state(message)
+    } else {
+        entries
+            .iter()
+            .fold(widget::list_column(), |list, entry| {
+                list.add(entry_row(entry))
+            })
+            .into()
+    };
 
     widget::column::with_capacity(3)
         .push(filter_input)
         .push(sort_row)
-        .push(entry_list)
-        .spacing(8)
+        .push(content)
+        .spacing(spacing.space_xxs)
         .width(Length::Fill)
         .into()
 }
 
-fn entry_row<'a>(entry: &'a HistoryEntry) -> Element<'a, Message> {
+/// A centered placeholder shown when the list is empty.
+fn empty_state(message: &str) -> Element<'_, Message> {
+    widget::container(widget::text::body(message))
+        .width(Length::Fill)
+        .align_x(Horizontal::Center)
+        .padding(libcosmic::theme::spacing().space_l)
+        .into()
+}
+
+fn entry_row(entry: &HistoryEntry) -> Element<'_, Message> {
+    let spacing = libcosmic::theme::spacing();
     let title: &str = if entry.title.is_empty() {
         &entry.url
     } else {
@@ -56,12 +80,17 @@ fn entry_row<'a>(entry: &'a HistoryEntry) -> Element<'a, Message> {
         .push(widget::text::caption(subtitle).width(Length::Fill))
         .width(Length::Fill);
 
-    let del = widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
-        .on_press(Message::HistoryDeleteEntry(entry.id));
+    let del = widget::tooltip(
+        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+            .on_press(Message::HistoryDeleteEntry(entry.id)),
+        widget::text::body("Remove from history"),
+        widget::tooltip::Position::Left,
+    );
 
     widget::row::with_capacity(2)
         .push(widget::mouse_area(info).on_press(Message::HistoryNavigate(entry.url.clone())))
         .push(del)
         .align_y(Alignment::Center)
+        .spacing(spacing.space_xs)
         .into()
 }
