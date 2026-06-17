@@ -350,6 +350,11 @@ pub struct BrowserConfig {
     /// Whether sites may use the camera and microphone. Off by default because
     /// Servo grants `getUserMedia` without a per-site prompt.
     pub allow_camera_microphone: bool,
+    /// Enable the Servo remote devtools server (Firefox Remote Debugging Protocol).
+    /// Takes effect on the next startup.
+    pub devtools_enabled: bool,
+    /// TCP port the devtools server listens on. Default: 6080.
+    pub devtools_port: u16,
     /// Default serif font for web content; empty uses the engine default.
     pub web_font_serif: String,
     /// Default sans-serif font for web content; empty uses the engine default.
@@ -375,6 +380,8 @@ impl Default for BrowserConfig {
             custom_filter_lists: Vec::new(),
             permission_defaults: PermissionDefaults::default(),
             allow_camera_microphone: false,
+            devtools_enabled: false,
+            devtools_port: 6080,
             web_font_serif: String::new(),
             web_font_sans_serif: String::new(),
             web_font_monospace: String::new(),

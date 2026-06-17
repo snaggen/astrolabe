@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 use cosmic_webview::{
     ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EditingActionEvent,
-    EmbedderControl, InputEvent, PermissionFeature, WebViewWidget, permission,
+    EmbedderControl, FIND_BAR_ID, FindBar, FindBarMsg, FindBarState, FindResult, InputEvent,
+    PermissionFeature, WebViewWidget, permission,
 };
 use dpi::PhysicalSize;
 use libcosmic::app::context_drawer;
@@ -461,8 +462,6 @@ pub enum Message {
     SuggestionPrev,
     /// User clicked a suggestion at the given index.
     SuggestionActivated(usize),
-    /// Close the suggestion list (Escape, webview click, or explicit dismiss).
-    SuggestionsClose,
     /// User clicked one of the quick-search engine buttons.
     SearchWithEngine(SearchEngine),
     /// Live autocomplete results arrived from the search engine's suggestion API.
@@ -536,6 +535,28 @@ pub enum Message {
     HistoryClose,
     /// Background history log write finished; no UI update needed.
     VisitLogged,
+    // ── Find in page ──────────────────────────────────────────────────────────
+    /// Open the find bar (Ctrl+F).
+    FindOpen,
+    /// Close the find bar (Escape or ✕ button).
+    FindClose,
+    /// User interacted with the find bar widget.
+    FindBar(FindBarMsg),
+    /// Result from a find or find-navigate operation.
+    FindResult(FindResult),
+    /// New 1-based current index from find_next (0 = no match or no session).
+    FindNext(usize),
+    /// New 1-based current index from find_prev (0 = no match or no session).
+    FindPrev(usize),
+    // ── Developer tools ───────────────────────────────────────────────────────
+    /// Show info about the running devtools server (F12).
+    DevToolsInfo,
+    /// Enable or disable the devtools server (settings toggle). Takes effect on restart.
+    SetDevToolsEnabled(bool),
+    /// Update the devtools server port (settings text field). Takes effect on restart.
+    SetDevToolsPort(String),
+    /// Close the info dialog.
+    InfoDialogClose,
 }
 
 // ── Application state ─────────────────────────────────────────────────────────
@@ -628,6 +649,10 @@ pub struct App {
     /// Session-only permission decisions, keyed by `(domain, feature_key)`,
     /// `true` = allow, `false` = deny. Not persisted; cleared on restart.
     session_permissions: HashMap<(String, String), bool>,
+    /// Message shown in the info dialog (DevTools status), or `None` when closed.
+    info_dialog_message: Option<String>,
+    /// Text-field mirror of `config.devtools_port` for the settings UI.
+    devtools_port_str: String,
 }
 
 /// Maps a key press to a browser action, implementing Firefox-compatible
@@ -652,6 +677,7 @@ fn shortcut_to_message(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> O
             "+" | "=" => return Some(Message::ZoomIn),
             "-" => return Some(Message::ZoomOut),
             "0" => return Some(Message::ZoomReset),
+            "f" => return Some(Message::FindOpen),
             _ => {}
         }
     }
@@ -676,13 +702,26 @@ fn shortcut_to_message(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> O
         return Some(Message::Reload);
     }
 
+    if let keyboard::Key::Named(Named::F12) = key {
+        return Some(Message::DevToolsInfo);
+    }
+
+    if let keyboard::Key::Named(Named::F3) = key {
+        return Some(Message::FindBar(if shift {
+            FindBarMsg::Prev
+        } else {
+            FindBarMsg::Next
+        }));
+    }
+
     // Unmodified keys drive the suggestion popup.
     if !ctrl
         && !alt
         && let keyboard::Key::Named(named) = key
     {
         return match named {
-            Named::Escape => Some(Message::SuggestionsClose),
+            // Escape closes the find bar first; falls through to suggestions on second press.
+            Named::Escape => Some(Message::FindClose),
             Named::ArrowDown => Some(Message::SuggestionNext),
             Named::ArrowUp => Some(Message::SuggestionPrev),
             _ => None,
@@ -697,13 +736,16 @@ fn shortcut_to_message(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> O
 /// Servo — otherwise a focused page field would also receive it (e.g. Ctrl+=
 /// would type "=").
 ///
-/// Only modified combinations and F5 qualify; the unmodified suggestion keys
-/// (arrows, Escape) must still reach the page when the webview has focus.
+/// Only modified combinations and function keys qualify; unmodified suggestion
+/// keys (arrows, Escape) must still reach the page when the webview has focus.
 fn is_chrome_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
     use keyboard::key::Named;
     let modified = modifiers.control() || modifiers.alt();
-    let is_f5 = matches!(key, keyboard::Key::Named(Named::F5));
-    (modified || is_f5) && shortcut_to_message(key, modifiers).is_some()
+    let is_function_key = matches!(
+        key,
+        keyboard::Key::Named(Named::F3 | Named::F5 | Named::F12)
+    );
+    (modified || is_function_key) && shortcut_to_message(key, modifiers).is_some()
 }
 
 impl App {
@@ -914,6 +956,12 @@ impl App {
                 }
             },
         )
+    }
+
+    /// Show an informational dialog with a single OK button.
+    fn show_info_dialog(&mut self, message: String) -> Task<Message> {
+        self.info_dialog_message = Some(message);
+        Task::none()
     }
 
     /// Issue a DB query and send the results back as `HistoryLoaded`.
@@ -1521,6 +1569,10 @@ impl libcosmic::Application for App {
         cosmic_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
         // Apply web-content fonts before the engine starts.
         cosmic_webview::set_web_fonts(config.web_fonts());
+        // Enable the remote devtools server if configured (must be before first tab).
+        if config.devtools_enabled {
+            cosmic_webview::set_devtools_enabled(config.devtools_port);
+        }
 
         let initial_size = PhysicalSize::new(1280u32, 800);
         // A command-line URL overrides the configured startup page.
@@ -1550,6 +1602,8 @@ impl libcosmic::Application for App {
         if let Some(first) = first_section {
             settings_nav.activate(first);
         }
+
+        let devtools_port_str = config.devtools_port.to_string();
 
         let app = App {
             core,
@@ -1588,6 +1642,8 @@ impl libcosmic::Application for App {
             site_permissions: HashMap::new(),
             permission_grants: Vec::new(),
             session_permissions: HashMap::new(),
+            info_dialog_message: None,
+            devtools_port_str,
         };
 
         let db_task = Task::perform(
@@ -2027,18 +2083,6 @@ impl libcosmic::Application for App {
                 self.suggestion_index = None;
                 self.suggestion_query.clear();
                 return self.try_navigate();
-            }
-
-            Message::SuggestionsClose => {
-                if self.suggestion_index.is_some() {
-                    let query = self.suggestion_query.clone();
-                    if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
-                        tab.url_bar_text = query;
-                    }
-                }
-                self.suggestions.clear();
-                self.suggestion_index = None;
-                self.suggestion_query.clear();
             }
 
             Message::SearchWithEngine(engine) => {
@@ -2756,6 +2800,147 @@ impl libcosmic::Application for App {
             }
 
             Message::VisitLogged => {}
+
+            // ── Find in page ──────────────────────────────────────────────────
+            Message::FindOpen => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    if tab.find_bar.is_none() {
+                        tab.find_bar = Some(FindBarState::default());
+                    }
+                    return widget::text_input::focus(FIND_BAR_ID.clone());
+                }
+            }
+
+            // Escape key: close find bar if open, otherwise close suggestions.
+            Message::FindClose => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && tab.find_bar.is_some()
+                {
+                    tab.servo.find_clear();
+                    tab.find_bar = None;
+                    return Task::none();
+                }
+                // No find bar open — fall through to suggestion dismissal.
+                if self.suggestion_index.is_some() {
+                    let query = self.suggestion_query.clone();
+                    if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                        tab.url_bar_text = query;
+                    }
+                }
+                self.suggestions.clear();
+                self.suggestion_index = None;
+                self.suggestion_query.clear();
+            }
+
+            Message::FindBar(msg) => {
+                let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
+                    return Task::none();
+                };
+                let Some(state) = tab.find_bar.as_mut() else {
+                    return Task::none();
+                };
+                match msg {
+                    FindBarMsg::QueryChanged(q) => {
+                        state.query = q.clone();
+                        let cs = state.case_sensitive;
+                        let wrap = state.wrap;
+                        return tab
+                            .servo
+                            .find(&q, cs, wrap)
+                            .map(|r| libcosmic::action::app(Message::FindResult(r)));
+                    }
+                    FindBarMsg::Next => {
+                        let wrap = state.wrap;
+                        return tab
+                            .servo
+                            .find_next(wrap)
+                            .map(|n| libcosmic::action::app(Message::FindNext(n)));
+                    }
+                    FindBarMsg::Prev => {
+                        let wrap = state.wrap;
+                        return tab
+                            .servo
+                            .find_prev(wrap)
+                            .map(|n| libcosmic::action::app(Message::FindPrev(n)));
+                    }
+                    FindBarMsg::Close => {
+                        tab.servo.find_clear();
+                        tab.find_bar = None;
+                    }
+                    FindBarMsg::ToggleWrap => {
+                        state.wrap = !state.wrap;
+                        let q = state.query.clone();
+                        let cs = state.case_sensitive;
+                        let wrap = state.wrap;
+                        return tab
+                            .servo
+                            .find(&q, cs, wrap)
+                            .map(|r| libcosmic::action::app(Message::FindResult(r)));
+                    }
+                    FindBarMsg::ToggleCaseSensitive => {
+                        state.case_sensitive = !state.case_sensitive;
+                        let q = state.query.clone();
+                        let cs = state.case_sensitive;
+                        let wrap = state.wrap;
+                        return tab
+                            .servo
+                            .find(&q, cs, wrap)
+                            .map(|r| libcosmic::action::app(Message::FindResult(r)));
+                    }
+                }
+            }
+
+            Message::FindResult(result) => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Some(state) = tab.find_bar.as_mut()
+                {
+                    state.result = result;
+                }
+            }
+
+            // JS returns the new 1-based index, or 0 when there are no matches.
+            Message::FindNext(n) | Message::FindPrev(n) => {
+                if n > 0
+                    && let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Some(state) = tab.find_bar.as_mut()
+                {
+                    state.result.current = n;
+                }
+            }
+
+            Message::InfoDialogClose => {
+                self.info_dialog_message = None;
+            }
+
+            // ── Developer tools ────────────────────────────────────────────────
+            Message::DevToolsInfo => {
+                // Devtools are enabled at startup via BrowserConfig; show a
+                // dialog so the user knows how to connect.
+                if self.config.devtools_enabled {
+                    let port = self.config.devtools_port;
+                    return self.show_info_dialog(format!(
+                        "DevTools server running on port {port}.\n\
+                         Connect from Firefox: DevTools → Remote Debugging → \
+                         Connect to localhost:{port}"
+                    ));
+                }
+                return self.show_info_dialog(
+                    "DevTools are disabled.\n\
+                     Enable them in Settings → Developer Tools and restart."
+                        .to_owned(),
+                );
+            }
+
+            Message::SetDevToolsEnabled(on) => {
+                self.write_config(|c, h| c.set_devtools_enabled(h, on));
+            }
+
+            Message::SetDevToolsPort(s) => {
+                self.devtools_port_str = s.clone();
+                if let Ok(port) = s.parse::<u16>() {
+                    self.write_config(|c, h| c.set_devtools_port(h, port));
+                }
+            }
         }
 
         Task::none()
@@ -2808,6 +2993,19 @@ impl libcosmic::Application for App {
     }
 
     fn dialog(&self) -> Option<Element<'_, Message>> {
+        // Info dialog (e.g. DevTools status).
+        if let Some(msg) = &self.info_dialog_message {
+            return Some(
+                widget::dialog()
+                    .title("Information")
+                    .body(msg.as_str())
+                    .primary_action(
+                        widget::button::standard("OK").on_press(Message::InfoDialogClose),
+                    )
+                    .into(),
+            );
+        }
+
         // The clear-data confirmation takes priority over any page dialog.
         if self.clear_confirm_open {
             let dialog = widget::dialog()
@@ -2864,6 +3062,7 @@ impl libcosmic::Application for App {
                     grants: &self.permission_grants,
                     allow_camera_microphone: self.config.allow_camera_microphone,
                 },
+                &self.devtools_port_str,
             ))
             .height(Length::Fill)
             .into();
@@ -2976,10 +3175,14 @@ impl libcosmic::Application for App {
             }
         };
 
-        let mut root = widget::column::with_capacity(3).push(nav_area);
+        let mut root = widget::column::with_capacity(4).push(nav_area);
         // Show a permission prompt banner below the toolbar while one is pending.
         if let Some(request) = &tab.pending_permission {
             root = root.push(url_bar::permission_prompt(request.feature()));
+        }
+        // Show the find bar just above the content area when active.
+        if let Some(find_state) = &tab.find_bar {
+            root = root.push(FindBar::view(find_state).map(Message::FindBar));
         }
         root.push(content_area).into()
     }

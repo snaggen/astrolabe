@@ -1,5 +1,7 @@
 use async_channel::Receiver;
-use cosmic_webview::{BluetoothDeviceSelectionRequest, PermissionRequest, ServoState};
+use cosmic_webview::{
+    BluetoothDeviceSelectionRequest, FindBarState, PermissionRequest, ServoState,
+};
 use dpi::PhysicalSize;
 use url::Url;
 
@@ -51,6 +53,8 @@ pub struct TabState {
     /// Set when an engine-level change (e.g. web fonts) needs this tab reloaded,
     /// deferred until the tab becomes visible to avoid reloading every tab at once.
     pub needs_reload: bool,
+    /// Active find-in-page session, or `None` when the find bar is closed.
+    pub find_bar: Option<FindBarState>,
 }
 
 impl TabState {
@@ -71,6 +75,7 @@ impl TabState {
                 pending_permission: None,
                 pending_bluetooth: None,
                 needs_reload: false,
+                find_bar: None,
             },
             rx,
         )

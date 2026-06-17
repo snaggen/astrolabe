@@ -118,6 +118,8 @@ pub enum SettingsSection {
     Fonts,
     /// Clear browsing data.
     ClearData,
+    /// Remote devtools server configuration.
+    Developer,
 }
 
 impl SettingsSection {
@@ -128,6 +130,7 @@ impl SettingsSection {
         SettingsSection::Permissions,
         SettingsSection::Fonts,
         SettingsSection::ClearData,
+        SettingsSection::Developer,
     ];
 
     /// The label shown in the side navigation.
@@ -138,6 +141,7 @@ impl SettingsSection {
             SettingsSection::Permissions => "Permissions",
             SettingsSection::Fonts => "Fonts",
             SettingsSection::ClearData => "Clear data",
+            SettingsSection::Developer => "Developer",
         }
     }
 }
@@ -150,6 +154,7 @@ pub fn view<'a>(
     filter_list_url: &'a str,
     clearing: DataClearing<'a>,
     permissions: Permissions<'a>,
+    devtools_port_str: &'a str,
 ) -> Element<'a, Message> {
     let spacing = libcosmic::theme::spacing();
     let section = nav
@@ -167,6 +172,7 @@ pub fn view<'a>(
         SettingsSection::Permissions => permissions_section(permissions),
         SettingsSection::Fonts => fonts_section(config),
         SettingsSection::ClearData => data_clearing_section(clearing),
+        SettingsSection::Developer => developer_section(config, devtools_port_str),
     };
     let scroll = widget::scrollable(
         widget::container(content)
@@ -560,5 +566,35 @@ fn number_row<'a>(
         .push(widget::text(label).width(Length::Fill))
         .push(dropdown)
         .align_y(Alignment::Center)
+        .into()
+}
+
+fn developer_section<'a>(config: &'a BrowserConfig, port_str: &'a str) -> Element<'a, Message> {
+    let spacing = libcosmic::theme::spacing();
+
+    let enable_row = widget::row::with_capacity(2)
+        .push(widget::text("Enable remote DevTools server").width(Length::Fill))
+        .push(widget::toggler(config.devtools_enabled).on_toggle(Message::SetDevToolsEnabled))
+        .align_y(Alignment::Center);
+
+    let port_row = widget::row::with_capacity(2)
+        .push(widget::text("DevTools port").width(Length::Fill))
+        .push(
+            widget::text_input("6080", port_str)
+                .on_input(Message::SetDevToolsPort)
+                .width(Length::Fixed(80.0)),
+        )
+        .align_y(Alignment::Center);
+
+    widget::column::with_capacity(4)
+        .push(widget::text::title4("Developer Tools"))
+        .push(enable_row)
+        .push(port_row)
+        .push(widget::text::caption(
+            "Implements the Firefox Remote Debugging Protocol. \
+             Connect from Firefox DevTools → Remote Debugging → localhost:PORT. \
+             Changes take effect on the next startup.",
+        ))
+        .spacing(spacing.space_xxs)
         .into()
 }
