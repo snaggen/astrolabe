@@ -13,10 +13,10 @@
 
 ## Overview
 
-A web browser built on the [COSMIC](https://github.com/pop-os/cosmic-epoch) UI toolkit (iced +
+A web browser built on the [libcosmic](https://github.com/pop-os/libcosmic) UI toolkit (iced +
 wgpu) with [Servo](https://servo.org/) as the rendering engine, via the companion
-[cosmic-webview](../cosmic-webview) library. The browser is a single binary that runs on Linux
-with X11 or Wayland.
+[cosmic-webview](https://codeberg.org/snaggen/cosmic-webview) library. The browser is a single
+binary that runs on Linux with X11 or Wayland.
 
 ## Features
 
@@ -42,7 +42,7 @@ with X11 or Wayland.
 ## Build and run
 
 ```bash
-# Dependencies: Rust stable, wgpu-capable GPU driver, GStreamer dev libs
+# Requires: Rust stable, wgpu-capable GPU driver, GStreamer dev libs
 cargo build
 
 # Run

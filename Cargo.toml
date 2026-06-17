@@ -6,9 +6,9 @@ rust-version = "1.93"
 license = "EUPL-1.2"
 
 [dependencies]
-cosmic-config = { path = "../cosmic-epoch/libcosmic/cosmic-config" }
-cosmic-webview = { path = "../cosmic-webview", features = ["xdg-portal"] }
-libcosmic = { package = "libcosmic", path = "../cosmic-epoch/libcosmic", features = ["winit", "wgpu"] }
+cosmic-config = { git = "https://github.com/pop-os/libcosmic" }
+cosmic-webview = { git = "https://codeberg.org/snaggen/cosmic-webview", features = ["xdg-portal"] }
+libcosmic = { package = "libcosmic", git = "https://github.com/pop-os/libcosmic", features = ["winit", "wgpu"] }
 
 async-channel = "2"
 dpi = "0.1"
