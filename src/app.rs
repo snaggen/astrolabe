@@ -1687,10 +1687,24 @@ impl libcosmic::Application for App {
         use libcosmic::iced::event;
         use libcosmic::iced::futures::StreamExt as _;
 
-        // All tabs share one Servo engine and therefore one waker channel.
-        let servo_sub = Subscription::run_with(ServoRx(self.servo_rx.clone()), |s| {
-            s.0.clone().map(|_| Message::ServoWake)
-        });
+        // Drive the shared Servo event loop. While the foreground tab is animating,
+        // clock spins at the display refresh rate via `window::frames`: the offscreen
+        // rendering context has no vsync, so relying on Servo's EventLoopWaker would
+        // spin as fast as the CPU allows (hundreds of fps). When idle, spin on the
+        // waker channel so async work (network, timers, input results) stays
+        // responsive. The two are mutually exclusive — one spin processes all pending
+        // engine work, so a coalesced/dropped waker signal loses nothing.
+        let animating = self
+            .tabs
+            .active_data::<TabState>()
+            .is_some_and(|tab| tab.servo.animating());
+        let spin_sub = if animating {
+            libcosmic::iced::window::frames().map(|_| Message::ServoWake)
+        } else {
+            Subscription::run_with(ServoRx(self.servo_rx.clone()), |s| {
+                s.0.clone().map(|_| Message::ServoWake)
+            })
+        };
 
         let window_sub = event::listen_with(|event, _status, _id| match event {
             Event::Window(window::Event::Rescaled(factor)) => Some(Message::ScaleChanged(factor)),
@@ -1709,7 +1723,7 @@ impl libcosmic::Application for App {
                 Message::ConfigChanged(update.config)
             });
 
-        Subscription::batch([servo_sub, window_sub, config_sub])
+        Subscription::batch([spin_sub, window_sub, config_sub])
     }
 
     /// Push the new light/dark theme into every tab's engine so web content's
