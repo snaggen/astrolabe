@@ -1694,6 +1694,15 @@ impl libcosmic::Application for App {
         // waker channel so async work (network, timers, input results) stays
         // responsive. The two are mutually exclusive — one spin processes all pending
         // engine work, so a coalesced/dropped waker signal loses nothing.
+        //
+        // Spin is driven here (app level), not inside WebViewWidget, on purpose. A
+        // widget-driven spin (like servoshell's winit loop) was evaluated and rejected:
+        // (1) iced requests a redraw on every message (needs_redraw = !messages
+        // .is_empty()), so a widget that spins and notifies would feed a
+        // message→redraw→spin loop; (2) the Servo engine is process-global and shared
+        // by all tabs, but only the active tab's widget renders — a tab that shows no
+        // WebViewWidget (e.g. Settings) would then stop spinning the engine and stall
+        // background loads. App-level spin avoids both.
         let animating = self
             .tabs
             .active_data::<TabState>()
