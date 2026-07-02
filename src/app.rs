@@ -280,6 +280,20 @@ fn resolve_page(page: &StartupPage) -> (Url, bool) {
     }
 }
 
+/// Map a dark-mode flag to the Servo theme that drives `prefers-color-scheme`.
+fn servo_theme_from(is_dark: bool) -> cosmic_webview::Theme {
+    if is_dark {
+        cosmic_webview::Theme::Dark
+    } else {
+        cosmic_webview::Theme::Light
+    }
+}
+
+/// The Servo theme matching the active COSMIC desktop theme.
+fn servo_theme() -> cosmic_webview::Theme {
+    servo_theme_from(libcosmic::theme::active().cosmic().is_dark)
+}
+
 // ── Context page ─────────────────────────────────────────────────────────────
 
 /// Which page is currently shown in the context drawer.
@@ -863,6 +877,7 @@ impl App {
     fn add_tab(&mut self, url: Url, show_new_tab_page: bool) -> segmented_button::Entity {
         let (mut tab, _rx) = TabState::new(url, self.current_size, self.scale);
         tab.show_new_tab_page = show_new_tab_page;
+        tab.servo.set_theme(servo_theme());
         self.tabs.insert().closable().text("New Tab").data(tab).id()
     }
 
@@ -881,6 +896,7 @@ impl App {
             let blank = Url::parse("about:blank").expect("about:blank is always valid");
             let (mut tab, _rx) = TabState::new(blank, self.current_size, self.scale);
             tab.kind = TabKind::Settings;
+            tab.servo.set_theme(servo_theme());
             self.tabs
                 .insert()
                 .closable()
@@ -1583,6 +1599,7 @@ impl libcosmic::Application for App {
 
         let (mut first_tab, servo_rx) = TabState::new(initial_url, initial_size, scale);
         first_tab.show_new_tab_page = show_new_tab_page;
+        first_tab.servo.set_theme(servo_theme());
 
         let mut tabs = segmented_button::SingleSelectModel::default();
         let first_id = tabs
@@ -1693,6 +1710,23 @@ impl libcosmic::Application for App {
             });
 
         Subscription::batch([servo_sub, window_sub, config_sub])
+    }
+
+    /// Push the new light/dark theme into every tab's engine so web content's
+    /// `prefers-color-scheme` follows the desktop without a reload.
+    fn system_theme_update(
+        &mut self,
+        _keys: &[&'static str],
+        new_theme: &libcosmic::cosmic_theme::Theme,
+    ) -> Task<Message> {
+        let theme = servo_theme_from(new_theme.is_dark);
+        let ids: Vec<_> = self.tabs.iter().collect();
+        for id in ids {
+            if let Some(tab) = self.tabs.data::<TabState>(id) {
+                tab.servo.set_theme(theme);
+            }
+        }
+        Task::none()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
