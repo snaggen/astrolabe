@@ -1765,13 +1765,16 @@ impl libcosmic::Application for App {
                 // mutate the tab model while iterating it.
                 let mut adopted: Vec<cosmic_webview::ServoState> = Vec::new();
 
+                // Set when an engine favicon was cached this wake, to refresh tiles.
+                let mut favicon_saved = false;
+
                 // Process state changes for every tab.
                 let ids: Vec<_> = self.tabs.iter().collect();
                 for id in ids {
                     let is_active = self.tabs.is_active(id);
 
                     // Collect volatile state while holding the mutable borrow.
-                    let (title, dialog, crash, permission) = {
+                    let (title, dialog, crash, permission, favicon, favicon_url) = {
                         let Some(tab) = self.tabs.data_mut::<TabState>(id) else {
                             continue;
                         };
@@ -1816,12 +1819,17 @@ impl libcosmic::Application for App {
 
                         let title = tab.servo.title();
 
+                        // Favicon reported by the engine (respects <link rel=icon>,
+                        // SVG, data: URIs); captured with its URL to cache per origin.
+                        let favicon = tab.servo.take_favicon();
+                        let favicon_url = tab.servo.current_url().map(|u| u.to_string());
+
                         // No frame copying here: the engine fills the shared
                         // frame buffer directly and the widget uploads it on
                         // the next draw. See cosmic-webview's FrameSink.
 
                         let crash = tab.servo.take_crash();
-                        (title, dialog, crash, permission)
+                        (title, dialog, crash, permission, favicon, favicon_url)
                     };
 
                     if let Some((request, domain)) = permission
@@ -1839,6 +1847,22 @@ impl libcosmic::Application for App {
 
                     if let Some((reason, _)) = crash {
                         tracing::error!("WebView crashed: {reason}");
+                    }
+
+                    // Show the favicon at the left of the tab, and cache it per
+                    // origin. Saving synchronously makes the file fresh before the
+                    // HTTP fallback in maybe_capture_active_thumbnail checks it, so
+                    // the engine icon suppresses the redundant network fetch.
+                    if let Some(rgba) = favicon {
+                        if let Some(url) = &favicon_url {
+                            if let Err(e) = crate::thumbnails::save_favicon(url, &rgba) {
+                                tracing::debug!("Favicon save failed: {e}");
+                            }
+                            favicon_saved = true;
+                        }
+                        let (w, h) = (rgba.width(), rgba.height());
+                        let handle = widget::icon::from_raster_pixels(w, h, rgba.into_raw());
+                        self.tabs.icon_set(id, widget::icon::icon(handle));
                     }
 
                     match dialog {
@@ -1879,6 +1903,11 @@ impl libcosmic::Application for App {
                         self.tabs.activate(id);
                         self.sync_tab_visibility();
                     }
+                }
+
+                // A freshly cached engine favicon may belong to a New Tab grid site.
+                if favicon_saved {
+                    self.rebuild_tile_images();
                 }
 
                 let mut tasks = Vec::new();
@@ -3075,6 +3104,8 @@ impl libcosmic::Application for App {
             .show_close_icon_on_hover(true)
             .on_activate(Message::TabActivated)
             .on_close(Message::TabClosed)
+            // Gap between the favicon and the tab title (defaults to 0).
+            .button_spacing(libcosmic::theme::spacing().space_xxs)
             .width(Length::Fill);
 
         let new_tab_btn = widget::button::icon(widget::icon::from_name("tab-new-symbolic"))

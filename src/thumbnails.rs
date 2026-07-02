@@ -75,6 +75,20 @@ pub fn save_thumbnail(url: &str, frame: &RgbaImage) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Downscale an engine-reported `favicon` to favicon size and cache it as a PNG
+/// for `url`'s origin.
+///
+/// Preferred over [`fetch_favicon`]: the engine resolves `<link rel="icon">`
+/// (including SVG and `data:` URIs), and writing a fresh file here suppresses the
+/// HTTP fallback for the same origin.
+pub fn save_favicon(url: &str, favicon: &RgbaImage) -> anyhow::Result<()> {
+    let path = favicon_path(url);
+    ensure_parent(&path)?;
+    let scaled = image::imageops::thumbnail(favicon, FAVICON_SIZE, FAVICON_SIZE);
+    scaled.save(&path)?;
+    Ok(())
+}
+
 /// Fetch `<origin>/favicon.ico` and cache it as a PNG for `url`'s origin.
 ///
 /// The request goes straight to the site itself (already visited), so it leaks
