@@ -62,22 +62,33 @@ impl TabState {
     pub fn new(url: Url, size: PhysicalSize<u32>, scale: f32) -> (Self, Receiver<()>) {
         let url_bar_text = url.to_string();
         let (servo, rx) = ServoState::new(url, size, scale);
-        (
-            Self {
-                servo,
-                kind: TabKind::Web,
-                url_bar_text,
-                url_bar_focused: false,
-                logged_url: None,
-                show_new_tab_page: false,
-                thumb_captured_url: None,
-                cookie_protection_override: None,
-                pending_permission: None,
-                pending_bluetooth: None,
-                needs_reload: false,
-                find_bar: None,
-            },
-            rx,
-        )
+        (Self::with_servo(servo, url_bar_text), rx)
+    }
+
+    /// Wrap an existing engine-created [`ServoState`] — e.g. a popup from
+    /// `window.open()` or a `target="_blank"` link — in a tab.
+    ///
+    /// The engine already drives the WebView, so no new waker receiver is
+    /// produced: all tabs share the one channel returned by the first tab.
+    pub fn adopt(servo: ServoState, url_bar_text: String) -> Self {
+        Self::with_servo(servo, url_bar_text)
+    }
+
+    /// Build a `Web` tab around an already-created [`ServoState`].
+    fn with_servo(servo: ServoState, url_bar_text: String) -> Self {
+        Self {
+            servo,
+            kind: TabKind::Web,
+            url_bar_text,
+            url_bar_focused: false,
+            logged_url: None,
+            show_new_tab_page: false,
+            thumb_captured_url: None,
+            cookie_protection_override: None,
+            pending_permission: None,
+            pending_bluetooth: None,
+            needs_reload: false,
+            find_bar: None,
+        }
     }
 }

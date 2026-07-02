@@ -1737,6 +1737,11 @@ impl libcosmic::Application for App {
                     tab.servo.spin();
                 }
 
+                // WebViews the engine opened for us (window.open, target=_blank),
+                // collected across all tabs and adopted after the loop so we don't
+                // mutate the tab model while iterating it.
+                let mut adopted: Vec<cosmic_webview::ServoState> = Vec::new();
+
                 // Process state changes for every tab.
                 let ids: Vec<_> = self.tabs.iter().collect();
                 for id in ids {
@@ -1780,6 +1785,12 @@ impl libcosmic::Application for App {
                             tab.pending_bluetooth = Some(request);
                         }
 
+                        // A page may open popups/new windows via window.open() or a
+                        // target="_blank" link; adopt each as a new tab below.
+                        while let Some(new_servo) = tab.servo.take_pending_new_tab() {
+                            adopted.push(new_servo);
+                        }
+
                         let title = tab.servo.title();
 
                         // No frame copying here: the engine fills the shared
@@ -1821,6 +1832,29 @@ impl libcosmic::Application for App {
                             }
                         }
                         None => {}
+                    }
+                }
+
+                // Adopt engine-created WebViews as foreground tabs, matching
+                // servoshell: the most recent popup becomes the active tab.
+                if !adopted.is_empty() {
+                    let mut new_id = None;
+                    for servo in adopted {
+                        servo.set_theme(servo_theme());
+                        let url_bar_text = servo
+                            .current_url()
+                            .map(|u| u.to_string())
+                            .unwrap_or_default();
+                        let tab = TabState::adopt(servo, url_bar_text);
+                        let id = self.tabs.insert().closable().text("New Tab").data(tab).id();
+                        if let Some(tab) = self.tabs.data::<TabState>(id) {
+                            self.apply_filter_to_tab(tab);
+                        }
+                        new_id = Some(id);
+                    }
+                    if let Some(id) = new_id {
+                        self.tabs.activate(id);
+                        self.sync_tab_visibility();
                     }
                 }
 
