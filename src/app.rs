@@ -339,6 +339,10 @@ pub enum Message {
     WebViewResized(u32, u32),
     /// HiDPI scale factor changed.
     ScaleChanged(f32),
+    /// A bare modifier key was pressed or released; forwarded to the active
+    /// WebView to keep the engine's global modifier state in sync (never carries
+    /// typed content — see `ServoState::send_modifier_key`).
+    ModifierKey(keyboard::Event),
     /// User activated (clicked) a tab.
     TabActivated(segmented_button::Entity),
     /// User closed a tab.
@@ -1717,9 +1721,18 @@ impl libcosmic::Application for App {
 
         let window_sub = event::listen_with(|event, _status, _id| match event {
             Event::Window(window::Event::Rescaled(factor)) => Some(Message::ScaleChanged(factor)),
-            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                shortcut_to_message(&key, modifiers)
-            }
+            Event::Keyboard(ke) => match &ke {
+                // A chrome shortcut takes precedence; otherwise forward the event
+                // so a bare modifier key keeps the engine's modifier state in sync
+                // at the window level (a release is seen even while a non-webview
+                // page is shown). ModifierKey ignores non-modifier keys.
+                keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    shortcut_to_message(key, *modifiers)
+                        .or_else(|| Some(Message::ModifierKey(ke.clone())))
+                }
+                keyboard::Event::KeyReleased { .. } => Some(Message::ModifierKey(ke.clone())),
+                keyboard::Event::ModifiersChanged(_) => None,
+            },
             _ => None,
         });
 
@@ -2255,6 +2268,16 @@ impl libcosmic::Application for App {
                     if let Some(tab) = self.tabs.data_mut::<TabState>(id) {
                         tab.servo.set_scale_factor(factor);
                     }
+                }
+            }
+
+            Message::ModifierKey(event) => {
+                // Keep the engine's global modifier state correct even when the
+                // release lands while a non-webview page is active. Only bare
+                // modifier keys are forwarded (send_modifier_key ignores the rest),
+                // so this never leaks typed content.
+                if let Some(tab) = self.tabs.active_data::<TabState>() {
+                    tab.servo.send_modifier_key(&event);
                 }
             }
 
