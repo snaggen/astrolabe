@@ -152,6 +152,11 @@ impl PlayerInterface {
     fn metadata(&self) -> std::collections::HashMap<String, OwnedValue> {
         self.metadata.clone()
     }
+    // Servo does not tell the embedder which media-session action handlers a page
+    // registered, so next/previous availability cannot be tracked per page. We
+    // advertise them as available: a page with a real playlist gets working
+    // next/previous (Servo invokes its handler), at the cost of showing controls
+    // that do nothing on a single audio/video element.
     #[zbus(property)]
     fn can_go_next(&self) -> bool {
         true
