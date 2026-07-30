@@ -2,10 +2,12 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
+use crate::mpris::{MediaUpdate, PlaybackStatus};
 use cosmic_webview::{
     ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EditingActionEvent,
     EmbedderControl, FIND_BAR_ID, FindBar, FindBarMsg, FindBarState, FindResult, InputEvent,
-    PermissionFeature, WebViewWidget, permission,
+    MediaSessionActionType, MediaSessionPlaybackState, PermissionFeature, WebViewWidget,
+    permission,
 };
 use dpi::PhysicalSize;
 use libcosmic::app::context_drawer;
@@ -345,6 +347,9 @@ pub enum Message {
     ModifierKey(keyboard::Event),
     /// User activated (clicked) a tab.
     TabActivated(segmented_button::Entity),
+    /// A media action arrived over MPRIS (play/pause/next/…); forward it to the
+    /// active tab's engine.
+    MediaAction(MediaSessionActionType),
     /// User closed a tab.
     TabClosed(segmented_button::Entity),
     /// User requested a new tab.
@@ -585,6 +590,11 @@ pub struct App {
     tabs: segmented_button::SingleSelectModel,
     /// Shared waker receiver: all tabs fire the same channel since they share one engine.
     servo_rx: async_channel::Receiver<()>,
+    /// MPRIS media integration; `None` if the D-Bus server could not start.
+    mpris: Option<crate::mpris::MprisHandle>,
+    /// (active tab, its media generation) last published to MPRIS, so we only
+    /// publish on an actual change or a tab switch.
+    last_media: Option<(segmented_button::Entity, u64)>,
     /// HiDPI scale for converting logical cursor coordinates to physical pixels.
     scale: f32,
     /// Physical size of the webview area, updated on each resize.
@@ -911,6 +921,51 @@ impl App {
         });
         self.tabs.activate(id);
         self.sync_tab_visibility();
+    }
+
+    /// Publishes the active tab's media state to MPRIS, but only when it changed
+    /// since the last publish (new metadata/playback state, or a different active
+    /// tab). No-op when the MPRIS server is unavailable.
+    fn publish_media(&mut self) {
+        if self.mpris.is_none() {
+            return;
+        }
+        let active = self.tabs.active();
+        let (generation, update) = {
+            let Some(tab) = self.tabs.active_data::<TabState>() else {
+                return;
+            };
+            let generation = tab.servo.media_generation();
+            if self.last_media == Some((active, generation)) {
+                return;
+            }
+            let status = match tab.servo.media_playback_state() {
+                Some(MediaSessionPlaybackState::Playing) => PlaybackStatus::Playing,
+                Some(MediaSessionPlaybackState::Paused) => PlaybackStatus::Paused,
+                _ => PlaybackStatus::Stopped,
+            };
+            let (title, artist, album) = match tab.servo.media_metadata() {
+                Some(m) => (
+                    (!m.title.is_empty()).then_some(m.title),
+                    (!m.artist.is_empty()).then_some(m.artist),
+                    (!m.album.is_empty()).then_some(m.album),
+                ),
+                None => (None, None, None),
+            };
+            (
+                generation,
+                MediaUpdate {
+                    status,
+                    title,
+                    artist,
+                    album,
+                },
+            )
+        };
+        self.last_media = Some((active, generation));
+        if let Some(mpris) = &self.mpris {
+            mpris.publish(update);
+        }
     }
 
     /// Close `id`, activating a neighbor first. Does nothing if it is the last tab.
@@ -1547,6 +1602,16 @@ impl Hash for ServoRx {
     }
 }
 
+/// Newtype so the MPRIS action receiver satisfies `Hash` for `Subscription::run_with`.
+#[derive(Clone)]
+struct MprisRx(async_channel::Receiver<MediaSessionActionType>);
+
+impl Hash for MprisRx {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::any::TypeId::of::<Self>().hash(state);
+    }
+}
+
 // ── Application trait implementation ─────────────────────────────────────────
 
 impl libcosmic::Application for App {
@@ -1637,6 +1702,8 @@ impl libcosmic::Application for App {
             suggestion_query: String::new(),
             tabs,
             servo_rx,
+            mpris: crate::mpris::spawn(),
+            last_media: None,
             scale,
             current_size: initial_size,
             context_menu: None,
@@ -1745,7 +1812,17 @@ impl libcosmic::Application for App {
                 Message::ConfigChanged(update.config)
             });
 
-        Subscription::batch([spin_sub, window_sub, config_sub])
+        // Forward MPRIS media actions (from the applet or hardware keys) into the
+        // app so the active tab's engine receives them.
+        let mut subs = vec![spin_sub, window_sub, config_sub];
+        if let Some(mpris) = &self.mpris {
+            let sub = Subscription::run_with(MprisRx(mpris.action_rx.clone()), |s| {
+                s.0.clone().map(Message::MediaAction)
+            });
+            subs.push(sub);
+        }
+
+        Subscription::batch(subs)
     }
 
     /// Push the new light/dark theme into every tab's engine so web content's
@@ -1941,6 +2018,9 @@ impl libcosmic::Application for App {
                 if favicon_saved {
                     self.rebuild_tile_images();
                 }
+
+                // Mirror the active tab's media state to the desktop (MPRIS).
+                self.publish_media();
 
                 let mut tasks = Vec::new();
 
@@ -2305,6 +2385,12 @@ impl libcosmic::Application for App {
                 self.sync_tab_visibility();
                 self.dismiss_context_menu();
                 self.sync_active_title();
+            }
+
+            Message::MediaAction(action) => {
+                if let Some(tab) = self.tabs.active_data::<TabState>() {
+                    tab.servo.send_media_action(action);
+                }
             }
 
             Message::TabClosed(id) => {

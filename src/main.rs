@@ -5,6 +5,7 @@ mod config;
 mod db;
 mod filter_engine;
 mod filter_lists;
+mod mpris;
 mod pages;
 mod tabs;
 mod thumbnails;

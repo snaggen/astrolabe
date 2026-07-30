@@ -20,7 +20,11 @@ turso = { version = "0.6.1", default-features = false }
 dirs = "6.0.0"
 anyhow = "1.0.102"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
-tokio = { version = "1", features = ["fs", "rt"] }
+tokio = { version = "1", features = ["fs", "rt", "net", "time"] }
+# MPRIS D-Bus media integration. Runs on its own current-thread Tokio runtime;
+# zbus uses the Tokio backend when a runtime is present. default-features off
+# keeps our request minimal — libcosmic already unifies the rest of the features.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 # AdBlock Plus / uBlock Origin filter list engine (Brave's Rust implementation).
 # embedded-domain-resolver is required; mimalloc excluded to avoid conflicting
 # with Servo's global allocator.
