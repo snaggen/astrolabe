@@ -393,6 +393,27 @@ pub fn permission_prompt<'a>(feature: PermissionFeature) -> Element<'a, Message>
         .into()
 }
 
+/// A prompt shown when a remote developer-tools client wants to connect. The
+/// devtools server is bound to loopback, so the connection is always local;
+/// the prompt still lets the user decline an unexpected one.
+pub fn devtools_prompt<'a>() -> Element<'a, Message> {
+    let row = widget::row::with_capacity(3)
+        .align_y(Alignment::Center)
+        .spacing(8)
+        .push(
+            widget::text("A developer tools client wants to connect (local connection).")
+                .width(Length::Fill),
+        )
+        .push(widget::button::standard("Deny").on_press(Message::DevtoolsRespond(false)))
+        .push(widget::button::suggested("Allow").on_press(Message::DevtoolsRespond(true)));
+
+    widget::container(row)
+        .padding(8)
+        .width(Length::Fill)
+        .class(libcosmic::theme::Container::Primary)
+        .into()
+}
+
 /// The zoom indicator: a percentage label shown only when zoom differs from
 /// 100 %. Clicking it opens a popover with zoom controls.
 fn zoom_indicator<'a>(zoom: f32, open: Option<UrlBarPopover>) -> Option<Element<'a, Message>> {

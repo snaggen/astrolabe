@@ -350,6 +350,8 @@ pub enum Message {
     /// A media action arrived over MPRIS (play/pause/next/…); forward it to the
     /// active tab's engine.
     MediaAction(MediaSessionActionType),
+    /// The user allowed (`true`) or denied (`false`) a remote-devtools connection.
+    DevtoolsRespond(bool),
     /// User closed a tab.
     TabClosed(segmented_button::Entity),
     /// User requested a new tab.
@@ -607,6 +609,9 @@ pub struct App {
     /// (active tab, its media generation) last published to MPRIS, so we only
     /// publish on an actual change or a tab switch.
     last_media: Option<(segmented_button::Entity, u64)>,
+    /// A pending remote-devtools connection awaiting the user's allow/deny.
+    /// Engine-level (one devtools server per process), so not per-tab.
+    pending_devtools: Option<cosmic_webview::DevtoolsRequest>,
     /// HiDPI scale for converting logical cursor coordinates to physical pixels.
     scale: f32,
     /// Physical size of the webview area, updated on each resize.
@@ -1734,6 +1739,7 @@ impl libcosmic::Application for App {
             servo_rx,
             mpris: crate::mpris::spawn(),
             last_media: None,
+            pending_devtools: None,
             scale,
             current_size: initial_size,
             context_menu: None,
@@ -1879,6 +1885,12 @@ impl libcosmic::Application for App {
                 // Spin the shared engine once — covers all pending WebView events.
                 if let Some(tab) = self.tabs.active_data::<TabState>() {
                     tab.servo.spin();
+                }
+
+                // A remote-devtools client may be requesting a connection. This is
+                // engine-level (one server per process), so poll it once per wake.
+                if let Some(request) = cosmic_webview::take_devtools_request() {
+                    self.pending_devtools = Some(request);
                 }
 
                 // WebViews the engine opened for us (window.open, target=_blank),
@@ -2421,6 +2433,16 @@ impl libcosmic::Application for App {
             Message::MediaAction(action) => {
                 if let Some(tab) = self.tabs.active_data::<TabState>() {
                     tab.servo.send_media_action(action);
+                }
+            }
+
+            Message::DevtoolsRespond(allow) => {
+                if let Some(request) = self.pending_devtools.take() {
+                    if allow {
+                        request.allow();
+                    } else {
+                        request.deny();
+                    }
                 }
             }
 
@@ -3507,6 +3529,10 @@ impl libcosmic::Application for App {
         // Show a permission prompt banner below the toolbar while one is pending.
         if let Some(request) = &tab.pending_permission {
             root = root.push(url_bar::permission_prompt(request.feature()));
+        }
+        // Show a remote-devtools connection prompt (engine-level, any tab).
+        if self.pending_devtools.is_some() {
+            root = root.push(url_bar::devtools_prompt());
         }
         // Show the find bar just above the content area when active.
         if let Some(find_state) = &tab.find_bar {
