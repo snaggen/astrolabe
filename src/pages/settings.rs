@@ -118,6 +118,8 @@ pub enum SettingsSection {
     Fonts,
     /// Clear browsing data.
     ClearData,
+    /// User scripts and user stylesheet.
+    UserContent,
     /// Remote devtools server configuration.
     Developer,
 }
@@ -130,6 +132,7 @@ impl SettingsSection {
         SettingsSection::Permissions,
         SettingsSection::Fonts,
         SettingsSection::ClearData,
+        SettingsSection::UserContent,
         SettingsSection::Developer,
     ];
 
@@ -141,6 +144,7 @@ impl SettingsSection {
             SettingsSection::Permissions => "Permissions",
             SettingsSection::Fonts => "Fonts",
             SettingsSection::ClearData => "Clear data",
+            SettingsSection::UserContent => "User content",
             SettingsSection::Developer => "Developer",
         }
     }
@@ -155,6 +159,7 @@ pub fn view<'a>(
     clearing: DataClearing<'a>,
     permissions: Permissions<'a>,
     devtools_port_str: &'a str,
+    user_scripts: &'a [crate::user_content::ScriptEntry],
 ) -> Element<'a, Message> {
     let spacing = libcosmic::theme::spacing();
     let section = nav
@@ -172,6 +177,7 @@ pub fn view<'a>(
         SettingsSection::Permissions => permissions_section(permissions),
         SettingsSection::Fonts => fonts_section(config),
         SettingsSection::ClearData => data_clearing_section(clearing),
+        SettingsSection::UserContent => user_content_section(config, user_scripts),
         SettingsSection::Developer => developer_section(config, devtools_port_str),
     };
     let scroll = widget::scrollable(
@@ -566,6 +572,79 @@ fn number_row<'a>(
         .push(widget::text(label).width(Length::Fill))
         .push(dropdown)
         .align_y(Alignment::Center)
+        .into()
+}
+
+/// The "User content" section: manage user scripts (files in the userscripts
+/// directory) and the user stylesheet.
+fn user_content_section<'a>(
+    config: &'a BrowserConfig,
+    scripts: &'a [crate::user_content::ScriptEntry],
+) -> Element<'a, Message> {
+    let spacing = libcosmic::theme::spacing();
+    let scripts_dir = crate::user_content::scripts_dir();
+
+    let mut script_list = widget::column::with_capacity(scripts.len() + 4)
+        .push(widget::text::title4("User scripts"))
+        // Tell the user exactly where to drop .js files so they appear below.
+        .push(widget::text::caption(format!(
+            "Place .js files in {} — each becomes a user script that runs on every page.",
+            scripts_dir.display()
+        )))
+        .spacing(spacing.space_xxs);
+
+    if scripts.is_empty() {
+        script_list = script_list.push(widget::text::caption("No user scripts found."));
+    }
+    for entry in scripts {
+        let name = entry.name.clone();
+        let toggle = widget::toggler(entry.enabled)
+            .on_toggle(move |_| Message::ToggleUserScript(name.clone()));
+        let label = widget::text(entry.name.as_str()).width(Length::Fill);
+        let remove = widget::button::icon(widget::icon::from_name("list-remove-symbolic"))
+            .on_press(Message::RemoveUserScript(entry.name.clone()));
+        let row = widget::row::with_capacity(3)
+            .push(toggle)
+            .push(label)
+            .push(remove)
+            .align_y(Alignment::Center)
+            .spacing(spacing.space_xxs);
+        script_list = script_list.push(row);
+    }
+
+    let script_actions = widget::row::with_capacity(2)
+        .push(widget::button::text("Open scripts folder").on_press(Message::OpenUserscriptsFolder))
+        .push(widget::button::text("Refresh").on_press(Message::RefreshUserContent))
+        .spacing(spacing.space_xxs);
+    script_list = script_list.push(script_actions);
+
+    let stylesheet_toggle = widget::row::with_capacity(2)
+        .push(widget::text("Apply user stylesheet (user.css)").width(Length::Fill))
+        .push(
+            widget::toggler(config.user_stylesheet_enabled)
+                .on_toggle(Message::ToggleUserStylesheet),
+        )
+        .align_y(Alignment::Center);
+
+    let stylesheet = widget::column::with_capacity(4)
+        .push(widget::text::title4("User stylesheet"))
+        .push(widget::text::caption(format!(
+            "Edit {} to style every page.",
+            crate::user_content::stylesheet_path().display()
+        )))
+        .push(stylesheet_toggle)
+        .push(widget::button::text("Edit user.css").on_press(Message::OpenUserStylesheet))
+        .spacing(spacing.space_xxs);
+
+    widget::column::with_capacity(3)
+        .push(widget::text::title4("User content"))
+        .push(script_list)
+        .push(stylesheet)
+        .push(widget::text::caption(
+            "Changes apply on the next page load — reload open tabs to see them.",
+        ))
+        .spacing(spacing.space_m)
+        .width(Length::Fill)
         .into()
 }
 

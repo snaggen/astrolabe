@@ -365,6 +365,11 @@ pub struct BrowserConfig {
     pub web_font_size: u16,
     /// Default web-content monospace font size in pixels.
     pub web_font_monospace_size: u16,
+    /// Whether the user stylesheet (`user.css`) is applied to every page.
+    pub user_stylesheet_enabled: bool,
+    /// File names (within the userscripts directory) that are currently turned
+    /// off. Scripts not listed here are enabled; new files default to enabled.
+    pub disabled_userscripts: Vec<String>,
 }
 
 impl Default for BrowserConfig {
@@ -387,6 +392,8 @@ impl Default for BrowserConfig {
             web_font_monospace: String::new(),
             web_font_size: 16,
             web_font_monospace_size: 13,
+            user_stylesheet_enabled: true,
+            disabled_userscripts: Vec::new(),
         }
     }
 }

@@ -10,6 +10,7 @@ mod pages;
 mod tabs;
 mod thumbnails;
 mod url_bar;
+mod user_content;
 
 use cosmic_config::CosmicConfigEntry as _;
 use libcosmic::app::Settings;

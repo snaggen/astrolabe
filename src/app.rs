@@ -387,6 +387,18 @@ pub enum Message {
     SettingsOpen,
     /// Select a settings section in the side navigation.
     SettingsSectionSelected(segmented_button::Entity),
+    /// Enable/disable a user script by file name.
+    ToggleUserScript(String),
+    /// Delete a user script file.
+    RemoveUserScript(String),
+    /// Open the userscripts directory in the file manager.
+    OpenUserscriptsFolder,
+    /// Re-scan the userscripts directory and re-apply user content.
+    RefreshUserContent,
+    /// Enable/disable the user stylesheet (user.css).
+    ToggleUserStylesheet(bool),
+    /// Open user.css in the default editor.
+    OpenUserStylesheet,
     /// Set what the first tab shows at startup, by dropdown index.
     SetStartupPageKind(usize),
     /// Set the fixed URL opened at startup when the "Fixed URL" kind is selected.
@@ -654,6 +666,9 @@ pub struct App {
     filter_engines: Option<std::sync::Arc<FilterEngines>>,
     /// Text being entered for a new custom filter list URL.
     custom_filter_list_url: String,
+    /// User scripts found in the userscripts directory, with enabled state.
+    /// Refreshed from disk when the User content settings section is shown.
+    user_scripts: Vec<crate::user_content::ScriptEntry>,
     // ── Data clearing ──────────────────────────────────────────────────────────
     /// Time range the "Clear browsing data" action applies to (history only).
     clear_range: ClearRange,
@@ -1445,6 +1460,17 @@ impl App {
         cosmic_webview::set_web_fonts(self.config.web_fonts());
     }
 
+    /// Push the current user scripts and stylesheet into the engine. Applies on
+    /// the next page load, so reload open tabs to see the change immediately.
+    fn apply_user_content(&self) {
+        cosmic_webview::set_user_content(crate::user_content::load(&self.config));
+    }
+
+    /// Re-scan the userscripts directory into `self.user_scripts`.
+    fn refresh_user_scripts(&mut self) {
+        self.user_scripts = crate::user_content::list_scripts(&self.config);
+    }
+
     /// Apply an engine-level change (e.g. fonts) to existing pages: reload the
     /// active tab now and flag the rest to reload lazily when next shown, so we
     /// never reload many background tabs at once.
@@ -1658,6 +1684,10 @@ impl libcosmic::Application for App {
         if config.devtools_enabled {
             cosmic_webview::set_devtools_enabled(config.devtools_port);
         }
+        // Apply user scripts / stylesheet before the engine starts so the first
+        // page load already has them.
+        cosmic_webview::set_user_content(crate::user_content::load(&config));
+        let user_scripts = crate::user_content::list_scripts(&config);
 
         let initial_size = PhysicalSize::new(1280u32, 800);
         // A command-line URL overrides the configured startup page.
@@ -1722,6 +1752,7 @@ impl libcosmic::Application for App {
             url_bar_popover: None,
             filter_engines: None,
             custom_filter_list_url: String::new(),
+            user_scripts,
             clear_range: ClearRange::default(),
             clear_history_checked: true,
             clear_cookies_checked: true,
@@ -2494,6 +2525,52 @@ impl libcosmic::Application for App {
 
             Message::SettingsSectionSelected(entity) => {
                 self.settings_nav.activate(entity);
+                // Re-scan so the User content section reflects files added on disk.
+                self.refresh_user_scripts();
+            }
+
+            Message::ToggleUserScript(name) => {
+                self.write_config(|c, h| {
+                    let mut disabled = c.disabled_userscripts.clone();
+                    if let Some(pos) = disabled.iter().position(|n| n == &name) {
+                        disabled.remove(pos);
+                    } else {
+                        disabled.push(name.clone());
+                    }
+                    c.set_disabled_userscripts(h, disabled)
+                });
+                self.refresh_user_scripts();
+                self.apply_user_content();
+            }
+
+            Message::RemoveUserScript(name) => {
+                crate::user_content::remove_script(&name);
+                // Drop any stale disabled entry for the removed file.
+                self.write_config(|c, h| {
+                    let mut disabled = c.disabled_userscripts.clone();
+                    disabled.retain(|n| n != &name);
+                    c.set_disabled_userscripts(h, disabled)
+                });
+                self.refresh_user_scripts();
+                self.apply_user_content();
+            }
+
+            Message::OpenUserscriptsFolder => {
+                crate::user_content::open_scripts_dir();
+            }
+
+            Message::RefreshUserContent => {
+                self.refresh_user_scripts();
+                self.apply_user_content();
+            }
+
+            Message::ToggleUserStylesheet(on) => {
+                self.write_config(|c, h| c.set_user_stylesheet_enabled(h, on));
+                self.apply_user_content();
+            }
+
+            Message::OpenUserStylesheet => {
+                crate::user_content::open_stylesheet();
             }
 
             Message::SetStartupPageKind(index) => {
@@ -3313,6 +3390,7 @@ impl libcosmic::Application for App {
                     allow_camera_microphone: self.config.allow_camera_microphone,
                 },
                 &self.devtools_port_str,
+                &self.user_scripts,
             ))
             .height(Length::Fill)
             .into();
