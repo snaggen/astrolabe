@@ -1781,6 +1781,10 @@ impl libcosmic::Application for App {
                 // Set when an engine favicon was cached this wake, to refresh tiles.
                 let mut favicon_saved = false;
 
+                // Tabs whose page called window.close(); removed after the loop
+                // so we don't mutate the tab model while iterating it.
+                let mut closed_ids: Vec<segmented_button::Entity> = Vec::new();
+
                 // Process state changes for every tab.
                 let ids: Vec<_> = self.tabs.iter().collect();
                 for id in ids {
@@ -1828,6 +1832,11 @@ impl libcosmic::Application for App {
                         // target="_blank" link; adopt each as a new tab below.
                         while let Some(new_servo) = tab.servo.take_pending_new_tab() {
                             adopted.push(new_servo);
+                        }
+
+                        // A page may close its own tab via window.close().
+                        if tab.servo.take_closed() {
+                            closed_ids.push(id);
                         }
 
                         let title = tab.servo.title();
@@ -1916,6 +1925,16 @@ impl libcosmic::Application for App {
                         self.tabs.activate(id);
                         self.sync_tab_visibility();
                     }
+                }
+
+                // Remove tabs whose page requested close (window.close()).
+                // `close_tab` keeps the last tab, so a page can never quit the app.
+                if !closed_ids.is_empty() {
+                    for id in closed_ids {
+                        self.close_tab(id);
+                    }
+                    self.sync_tab_visibility();
+                    self.sync_active_title();
                 }
 
                 // A freshly cached engine favicon may belong to a New Tab grid site.
