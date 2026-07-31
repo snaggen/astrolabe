@@ -9,11 +9,11 @@ use cosmic_webview::{
     MediaSessionActionType, MediaSessionPlaybackState, PermissionFeature, WebViewWidget,
     permission,
 };
-use dpi::PhysicalSize;
+use dpi::{PhysicalPosition, PhysicalSize};
 use libcosmic::app::context_drawer;
 use libcosmic::app::{Core, Task};
 use libcosmic::executor;
-use libcosmic::iced::{Event, Length, Subscription, keyboard, window};
+use libcosmic::iced::{Event, Length, Size, Subscription, keyboard, window};
 use libcosmic::prelude::*;
 use libcosmic::widget;
 use libcosmic::widget::menu::{self, action::MenuAction};
@@ -296,6 +296,14 @@ fn servo_theme() -> cosmic_webview::Theme {
     servo_theme_from(libcosmic::theme::active().cosmic().is_dark)
 }
 
+/// Convert an iced logical size to the physical pixels the engine works in.
+fn logical_to_physical(size: Size, scale: f32) -> PhysicalSize<u32> {
+    PhysicalSize::new(
+        (size.width * scale).round() as u32,
+        (size.height * scale).round() as u32,
+    )
+}
+
 // ── Context page ─────────────────────────────────────────────────────────────
 
 /// Which page is currently shown in the context drawer.
@@ -341,6 +349,10 @@ pub enum Message {
     WebViewResized(u32, u32),
     /// HiDPI scale factor changed.
     ScaleChanged(f32),
+    /// The host window opened or was resized; screen geometry needs re-querying.
+    WindowGeometryChanged,
+    /// Queried monitor size (`None` if unknown) and window size, in logical pixels.
+    ScreenGeometry(Option<Size>, Size),
     /// A bare modifier key was pressed or released; forwarded to the active
     /// WebView to keep the engine's global modifier state in sync (never carries
     /// typed content — see `ServoState::send_modifier_key`).
@@ -1053,6 +1065,39 @@ impl App {
         )
     }
 
+    /// Ask the windowing system for the current monitor and window size, which
+    /// arrive back as [`Message::ScreenGeometry`].
+    fn refresh_screen_geometry(&self) -> Task<Message> {
+        let Some(id) = self.core.main_window_id() else {
+            return Task::none();
+        };
+        window::monitor_size(id)
+            .then(move |monitor| {
+                window::size(id).map(move |size| Message::ScreenGeometry(monitor, size))
+            })
+            .map(libcosmic::action::app)
+    }
+
+    /// Report screen and window geometry to web content, backing `window.screen`
+    /// and `window.outerWidth`/`outerHeight`.
+    ///
+    /// iced reports logical pixels and Servo wants physical ones, so both sizes
+    /// are scaled by the same factor the engine uses for the page itself.
+    fn apply_screen_geometry(&self, monitor: Option<Size>, window_size: Size) {
+        let window = logical_to_physical(window_size, self.scale);
+        // Without a known monitor the window is the closest thing to a screen.
+        let screen = monitor.map_or(window, |size| logical_to_physical(size, self.scale));
+        cosmic_webview::set_screen_geometry(cosmic_webview::ScreenGeometry {
+            screen_size: screen,
+            // Neither winit nor Wayland reports the work area, so panels and
+            // docks are not subtracted: availWidth/availHeight are the full size.
+            available_size: screen,
+            // Wayland never tells a client where its window sits on screen.
+            window_position: PhysicalPosition::new(0, 0),
+            window_size: window,
+        });
+    }
+
     /// Show an informational dialog with a single OK button.
     fn show_info_dialog(&mut self, message: String) -> Task<Message> {
         self.info_dialog_message = Some(message);
@@ -1695,6 +1740,18 @@ impl libcosmic::Application for App {
         let user_scripts = crate::user_content::list_scripts(&config);
 
         let initial_size = PhysicalSize::new(1280u32, 800);
+        // Seed the screen geometry from the initial window size. Querying the
+        // real monitor is asynchronous, and until it answers Servo reports a
+        // 0×0 screen — a page reading `screen.width` at document-start on the
+        // first load would divide by zero. The real values replace these as
+        // soon as the query returns.
+        cosmic_webview::set_screen_geometry(cosmic_webview::ScreenGeometry {
+            screen_size: initial_size,
+            available_size: initial_size,
+            window_position: PhysicalPosition::new(0, 0),
+            window_size: initial_size,
+        });
+
         // A command-line URL overrides the configured startup page.
         let (initial_url, show_new_tab_page) = match flags {
             Some(url) => (url, false),
@@ -1779,7 +1836,8 @@ impl libcosmic::Application for App {
             },
         );
         let filter_task = app.build_filter_engines();
-        (app, Task::batch(vec![db_task, filter_task]))
+        let geometry_task = app.refresh_screen_geometry();
+        (app, Task::batch(vec![db_task, filter_task, geometry_task]))
     }
 
     fn on_app_exit(&mut self) -> Option<Message> {
@@ -1825,6 +1883,11 @@ impl libcosmic::Application for App {
 
         let window_sub = event::listen_with(|event, _status, _id| match event {
             Event::Window(window::Event::Rescaled(factor)) => Some(Message::ScaleChanged(factor)),
+            // Wayland reports no window position and no monitor change, so a
+            // resize is the only signal that the screen geometry may have moved.
+            Event::Window(window::Event::Opened { .. } | window::Event::Resized(_)) => {
+                Some(Message::WindowGeometryChanged)
+            }
             Event::Keyboard(ke) => match &ke {
                 // A chrome shortcut takes precedence; otherwise forward the event
                 // so a bare modifier key keeps the engine's modifier state in sync
@@ -2411,6 +2474,14 @@ impl libcosmic::Application for App {
                         tab.servo.set_scale_factor(factor);
                     }
                 }
+                // A new scale factor also means a new monitor, in practice.
+                return self.refresh_screen_geometry();
+            }
+
+            Message::WindowGeometryChanged => return self.refresh_screen_geometry(),
+
+            Message::ScreenGeometry(monitor, window_size) => {
+                self.apply_screen_geometry(monitor, window_size);
             }
 
             Message::ModifierKey(event) => {
@@ -3539,5 +3610,34 @@ impl libcosmic::Application for App {
             root = root.push(FindBar::view(find_state).map(Message::FindBar));
         }
         root.push(content_area).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logical_to_physical_scales_and_rounds() {
+        let size = Size::new(1280.0, 800.0);
+        assert_eq!(logical_to_physical(size, 1.0), PhysicalSize::new(1280, 800));
+        assert_eq!(
+            logical_to_physical(size, 1.5),
+            PhysicalSize::new(1920, 1200)
+        );
+        assert_eq!(
+            logical_to_physical(Size::new(1279.4, 799.6), 1.0),
+            PhysicalSize::new(1279, 800)
+        );
+    }
+
+    /// A window can be laid out at zero or negative size before its first
+    /// configure; the cast must saturate rather than wrap.
+    #[test]
+    fn logical_to_physical_clamps_non_positive_sizes() {
+        assert_eq!(
+            logical_to_physical(Size::new(-10.0, 0.0), 1.0),
+            PhysicalSize::new(0, 0)
+        );
     }
 }
