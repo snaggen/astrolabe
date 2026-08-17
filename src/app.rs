@@ -1026,6 +1026,11 @@ impl App {
 
     /// Adjust the active tab's page zoom by `delta`, clamped to the supported
     /// range. Rounding keeps repeated steps from accumulating float drift.
+    ///
+    /// Keyboard shortcuts and the address-bar control are the only ways in:
+    /// touchpad pinch never arrives, because iced has no gesture event to carry
+    /// what the compositor and winit already deliver (pop-os/libcosmic#1315,
+    /// iced-rs/iced#3377). See `WebViewWidget` in cosmic-webview.
     fn adjust_zoom(&mut self, delta: f32) {
         if let Some(tab) = self.tabs.active_data::<TabState>() {
             let target = (tab.servo.page_zoom() + delta).clamp(ZOOM_MIN, ZOOM_MAX);
