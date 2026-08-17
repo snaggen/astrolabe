@@ -448,6 +448,9 @@ pub enum Message {
     /// Set the active tab's per-site cookie-protection override (URL-bar popover).
     /// `None` removes the override, restoring the global default.
     SetCookieProtectionOverride(Option<CookieProtectionLevel>),
+    /// Answer the active tab's `beforeunload` prompt: `true` discards the page,
+    /// `false` keeps it.
+    UnloadRespond(bool),
     /// Set the theme web content sees on pages without an override of their own
     /// (settings page).
     SetThemePreference(ThemeChoice),
@@ -620,6 +623,8 @@ pub struct App {
     servo_rx: async_channel::Receiver<()>,
     /// MPRIS media integration; `None` if the D-Bus server could not start.
     mpris: Option<crate::mpris::MprisHandle>,
+    /// Desktop notifications posted by pages; `None` if the thread could not start.
+    notifications: Option<crate::notifications::NotificationHandle>,
     /// (active tab, its media generation) last published to MPRIS, so we only
     /// publish on an actual change or a tab switch.
     last_media: Option<(segmented_button::Entity, u64)>,
@@ -1913,6 +1918,7 @@ impl libcosmic::Application for App {
             tabs,
             servo_rx,
             mpris: crate::mpris::spawn(),
+            notifications: crate::notifications::spawn(),
             last_media: None,
             pending_devtools: None,
             scale,
@@ -2094,6 +2100,9 @@ impl libcosmic::Application for App {
                 // so we don't mutate the tab model while iterating it.
                 let mut closed_ids: Vec<segmented_button::Entity> = Vec::new();
 
+                // Notifications posted by any tab this wake, shown after the loop.
+                let mut notifications: Vec<cosmic_webview::Notification> = Vec::new();
+
                 // Process state changes for every tab.
                 let ids: Vec<_> = self.tabs.iter().collect();
                 for id in ids {
@@ -2136,6 +2145,16 @@ impl libcosmic::Application for App {
                         if let Some(request) = tab.servo.take_bluetooth_request() {
                             tab.pending_bluetooth = Some(request);
                         }
+
+                        // A page with unsaved work may ask to be kept; hold the
+                        // request until the confirmation dialog is answered.
+                        if let Some(request) = tab.servo.take_unload_request() {
+                            tab.pending_unload = Some(request);
+                        }
+
+                        // Desktop notifications the page posted. Servo has already
+                        // applied the site's permission, so these are cleared to show.
+                        notifications.extend(tab.servo.take_notifications());
 
                         // A page may open popups/new windows via window.open() or a
                         // target="_blank" link; adopt each as a new tab below.
@@ -2249,6 +2268,13 @@ impl libcosmic::Application for App {
                 // A freshly cached engine favicon may belong to a New Tab grid site.
                 if favicon_saved {
                     self.rebuild_tile_images();
+                }
+
+                // Hand any notifications the pages posted to the desktop.
+                if let Some(handle) = &self.notifications {
+                    for notification in &notifications {
+                        handle.show(notification.into());
+                    }
                 }
 
                 // Mirror the active tab's media state to the desktop (MPRIS).
@@ -2898,6 +2924,17 @@ impl libcosmic::Application for App {
                 let stored = self.store_active_site_settings();
                 self.reload_active_tab();
                 return stored;
+            }
+            Message::UnloadRespond(leave) => {
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>()
+                    && let Some(request) = tab.pending_unload.take()
+                {
+                    if leave {
+                        request.allow();
+                    } else {
+                        request.deny();
+                    }
+                }
             }
             Message::SetThemePreference(choice) => {
                 self.write_config(|c, h| c.set_theme_preference(h, choice));
@@ -3604,6 +3641,26 @@ impl libcosmic::Application for App {
             && let Some(request) = &tab.pending_bluetooth
         {
             return Some(bluetooth_dialog(request.devices()));
+        }
+
+        // A page with unsaved work asks before it is discarded. The message is
+        // ours, not the page's: Servo does not pass the `beforeunload` string,
+        // and browsers stopped showing page-supplied text long ago anyway.
+        if let Some(tab) = self.tabs.active_data::<TabState>()
+            && tab.pending_unload.is_some()
+        {
+            return Some(
+                widget::dialog()
+                    .title("Leave this page?")
+                    .body("Changes you made may not be saved.")
+                    .primary_action(
+                        widget::button::destructive("Leave").on_press(Message::UnloadRespond(true)),
+                    )
+                    .secondary_action(
+                        widget::button::standard("Stay").on_press(Message::UnloadRespond(false)),
+                    )
+                    .into(),
+            );
         }
 
         self.tabs

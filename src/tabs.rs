@@ -1,6 +1,7 @@
 use async_channel::Receiver;
 use cosmic_webview::{
-    BluetoothDeviceSelectionRequest, FindBarState, PermissionRequest, ServoState,
+    AllowOrDenyRequest, BluetoothDeviceSelectionRequest, FindBarState, PermissionRequest,
+    ServoState,
 };
 use dpi::PhysicalSize;
 use url::Url;
@@ -56,6 +57,9 @@ pub struct TabState {
     /// A Bluetooth device-selection request from the page awaiting the user's
     /// choice. Shown as a picker dialog; a newer request replaces an unanswered one.
     pub pending_bluetooth: Option<BluetoothDeviceSelectionRequest>,
+    /// A `beforeunload` request from a page that reports unsaved work, awaiting
+    /// the user's confirmation. Dropping it lets the page go, as Servo defaults to.
+    pub pending_unload: Option<AllowOrDenyRequest>,
     /// Set when an engine-level change (e.g. web fonts) needs this tab reloaded,
     /// deferred until the tab becomes visible to avoid reloading every tab at once.
     pub needs_reload: bool,
@@ -95,6 +99,7 @@ impl TabState {
             settings_domain: None,
             pending_permission: None,
             pending_bluetooth: None,
+            pending_unload: None,
             needs_reload: false,
             find_bar: None,
         }

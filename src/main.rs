@@ -8,6 +8,7 @@ mod filter_engine;
 mod filter_lists;
 mod frosted;
 mod mpris;
+mod notifications;
 mod pages;
 mod tabs;
 mod thumbnails;
