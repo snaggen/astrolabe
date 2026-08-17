@@ -863,9 +863,18 @@ impl App {
         tab.pending_bluetooth = None;
         tab.servo.navigate(url);
 
-        let focus_task = libcosmic::iced::widget::operation::focus_next();
-
-        let mut tasks = vec![focus_task];
+        // Drop focus rather than advancing it: `focus_next` parked focus on the
+        // next widget in the toolbar — the bookmark star — where it drew a focus
+        // ring and would have answered Space with a bookmark toggle. The page
+        // does not need iced focus, since `WebViewWidget` takes key events
+        // whenever the address bar does not have them.
+        //
+        // Focusing an id no widget carries is how that is spelled: the runtime
+        // wraps no `unfocus` task, and the focus operation unfocuses everything
+        // that does not match its target.
+        let mut tasks = vec![libcosmic::iced::widget::operation::focus(
+            widget::Id::unique(),
+        )];
 
         if is_search && let Some(conn) = self.db.clone() {
             let raw2 = raw.clone();
