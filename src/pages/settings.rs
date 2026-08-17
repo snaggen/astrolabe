@@ -167,9 +167,16 @@ pub fn view<'a>(
         .copied()
         .unwrap_or_default();
 
-    let nav_column = segmented_button::vertical(nav)
-        .on_activate(Message::SettingsSectionSelected)
-        .width(Length::Fixed(200.0));
+    // The section list sits on its own surface, like the nav bar in
+    // cosmic-settings: `Container::Primary` is the colour that widget uses.
+    let nav_column = widget::container(
+        segmented_button::vertical(nav)
+            .on_activate(Message::SettingsSectionSelected)
+            .width(Length::Fixed(200.0)),
+    )
+    .padding(spacing.space_xxs)
+    .height(Length::Fill)
+    .class(libcosmic::theme::Container::Primary);
 
     let content = match section {
         SettingsSection::General => general_section(config),
@@ -198,20 +205,22 @@ pub fn view<'a>(
 
 /// Build the "General" section: startup page and default search engine.
 fn general_section(config: &BrowserConfig) -> Element<'_, Message> {
-    let spacing = libcosmic::theme::spacing();
-    widget::column::with_capacity(4)
-        .push(widget::text::title4("Startup"))
-        .push(page_kind_controls(
-            "On startup show",
-            &config.startup_page,
-            Message::SetStartupPageKind,
-            Message::SetStartupUrl,
-        ))
-        .push(widget::text::title4("Search"))
-        .push(search_engine_controls(config))
-        .spacing(spacing.space_s)
-        .width(Length::Fill)
-        .into()
+    widget::settings::view_column(vec![
+        widget::settings::section()
+            .title("Startup")
+            .add(page_kind_controls(
+                "On startup show",
+                &config.startup_page,
+                Message::SetStartupPageKind,
+                Message::SetStartupUrl,
+            ))
+            .into(),
+        widget::settings::section()
+            .title("Search")
+            .add(search_engine_controls(config))
+            .into(),
+    ])
+    .into()
 }
 
 /// Build the default-search-engine controls: a dropdown of built-in engines plus
@@ -292,9 +301,7 @@ fn privacy_section<'a>(
         }
     };
 
-    let mut filter_section = widget::column::with_capacity(8)
-        .push(widget::text::title4("Custom filter lists"))
-        .spacing(spacing.space_xxs);
+    let mut filter_section = widget::settings::section().title("Custom filter lists");
 
     for (i, entry) in config.custom_filter_lists.iter().enumerate() {
         let toggle =
@@ -308,7 +315,7 @@ fn privacy_section<'a>(
             .push(remove)
             .align_y(Alignment::Center)
             .spacing(spacing.space_xxs);
-        filter_section = filter_section.push(row);
+        filter_section = filter_section.add(row);
     }
 
     let can_add = !filter_list_url.trim().is_empty();
@@ -324,16 +331,17 @@ fn privacy_section<'a>(
         ))
         .align_y(Alignment::Center)
         .spacing(spacing.space_xxs);
-    filter_section = filter_section.push(add_row);
+    filter_section = filter_section.add(add_row);
 
-    widget::column::with_capacity(4)
-        .push(widget::text::title4("Privacy"))
-        .push(cookie_row)
-        .push(widget::text::caption(cookie_description))
-        .push(filter_section)
-        .spacing(spacing.space_s)
-        .width(Length::Fill)
-        .into()
+    widget::settings::view_column(vec![
+        widget::settings::section()
+            .title("Tracking protection")
+            .add(cookie_row)
+            .add(widget::text::caption(cookie_description))
+            .into(),
+        filter_section.into(),
+    ])
+    .into()
 }
 
 /// Selectable web-content font sizes, in pixels.
@@ -378,7 +386,6 @@ fn font_size_row<'a>(
 /// Build the "Appearance" section: the colour scheme reported to pages, and the
 /// default serif/sans-serif/monospace families and base sizes for web content.
 fn appearance_section(config: &BrowserConfig) -> Element<'_, Message> {
-    let spacing = libcosmic::theme::spacing();
     let theme_labels: Vec<&str> = ThemeChoice::ALL.iter().map(ThemeChoice::label).collect();
     let theme_selected = ThemeChoice::ALL
         .iter()
@@ -390,44 +397,48 @@ fn appearance_section(config: &BrowserConfig) -> Element<'_, Message> {
         }))
         .align_y(Alignment::Center);
 
-    widget::column::with_capacity(10)
-        .push(widget::text::title4("Color scheme"))
-        .push(widget::text::caption(
-            "What pages see in prefers-color-scheme. Individual sites can be \
-             overridden from the address bar.",
-        ))
-        .push(theme_row)
-        .push(widget::text::title4("Fonts"))
-        .push(widget::text::caption(
-            "Default fonts for web pages. Leave a family blank to use the engine default.",
-        ))
-        .push(font_family_row(
-            "Serif",
-            &config.web_font_serif,
-            Message::SetWebFontSerif,
-        ))
-        .push(font_family_row(
-            "Sans-serif",
-            &config.web_font_sans_serif,
-            Message::SetWebFontSansSerif,
-        ))
-        .push(font_family_row(
-            "Monospace",
-            &config.web_font_monospace,
-            Message::SetWebFontMonospace,
-        ))
-        .push(font_size_row(
-            "Size",
-            config.web_font_size,
-            Message::SetWebFontSize,
-        ))
-        .push(font_size_row(
-            "Monospace size",
-            config.web_font_monospace_size,
-            Message::SetWebFontMonospaceSize,
-        ))
-        .spacing(spacing.space_xxs)
-        .into()
+    widget::settings::view_column(vec![
+        widget::settings::section()
+            .title("Color scheme")
+            .add(widget::text::caption(
+                "What pages see in prefers-color-scheme. Individual sites can be \
+                 overridden from the address bar.",
+            ))
+            .add(theme_row)
+            .into(),
+        widget::settings::section()
+            .title("Fonts")
+            .add(widget::text::caption(
+                "Default fonts for web pages. Leave a family blank to use the engine default.",
+            ))
+            .add(font_family_row(
+                "Serif",
+                &config.web_font_serif,
+                Message::SetWebFontSerif,
+            ))
+            .add(font_family_row(
+                "Sans-serif",
+                &config.web_font_sans_serif,
+                Message::SetWebFontSansSerif,
+            ))
+            .add(font_family_row(
+                "Monospace",
+                &config.web_font_monospace,
+                Message::SetWebFontMonospace,
+            ))
+            .add(font_size_row(
+                "Size",
+                config.web_font_size,
+                Message::SetWebFontSize,
+            ))
+            .add(font_size_row(
+                "Monospace size",
+                config.web_font_monospace_size,
+                Message::SetWebFontMonospaceSize,
+            ))
+            .into(),
+    ])
+    .into()
 }
 
 /// Build the "Clear browsing data" section: a time-range dropdown, category
@@ -464,19 +475,20 @@ fn data_clearing_section(clearing: DataClearing<'_>) -> Element<'_, Message> {
     let clear_button = widget::button::destructive("Clear now")
         .on_press_maybe(can_clear.then_some(Message::RequestClearData));
 
-    let mut section = widget::column::with_capacity(7)
-        .push(widget::text::title4("Clear browsing data"))
-        .push(range_row)
-        .push(history_toggle)
-        .push(cookies_toggle)
-        .push(range_note)
-        .push(clear_button)
-        .spacing(spacing.space_xxs);
+    let clearing_section = widget::settings::section()
+        .title("Clear browsing data")
+        .add(range_row)
+        .add(history_toggle)
+        .add(cookies_toggle)
+        .add(range_note)
+        .add(clear_button);
+
+    let mut sections = vec![clearing_section.into()];
 
     if !clearing.site_domains.is_empty() {
-        section = section
-            .push(widget::text::heading("Sites with stored data"))
-            .push(widget::text::caption(
+        let mut sites = widget::settings::section()
+            .title("Sites with stored data")
+            .add(widget::text::caption(
                 "Remove cookies, site storage, and history for a single site.",
             ));
         for domain in clearing.site_domains {
@@ -491,11 +503,12 @@ fn data_clearing_section(clearing: DataClearing<'_>) -> Element<'_, Message> {
                 .push(remove)
                 .align_y(Alignment::Center)
                 .spacing(spacing.space_xxs);
-            section = section.push(row);
+            sites = sites.add(row);
         }
+        sections.push(sites.into());
     }
 
-    section.into()
+    widget::settings::view_column(sections).into()
 }
 
 /// Build the "Site permissions" section: a global default per category and a
@@ -517,16 +530,15 @@ fn permissions_section(permissions: Permissions<'_>) -> Element<'_, Message> {
         )
         .align_y(Alignment::Center);
 
-    let mut section = widget::column::with_capacity(8)
-        .push(widget::text::title4("Site permissions"))
-        .push(widget::text::caption(
+    let mut defaults = widget::settings::section()
+        .title("Site permissions")
+        .add(widget::text::caption(
             "Default response when a site asks for a permission.",
         ))
-        .push(camera_mic)
-        .push(widget::text::caption(
+        .add(camera_mic)
+        .add(widget::text::caption(
             "Camera and microphone are granted without a prompt; takes effect on the next page load.",
-        ))
-        .spacing(spacing.space_xxs);
+        ));
 
     for kind in PermissionKind::ALL {
         let current = permissions.defaults.get(kind);
@@ -542,11 +554,13 @@ fn permissions_section(permissions: Permissions<'_>) -> Element<'_, Message> {
                 },
             ))
             .align_y(Alignment::Center);
-        section = section.push(row);
+        defaults = defaults.add(row);
     }
 
+    let mut sections = vec![defaults.into()];
+
     if !permissions.grants.is_empty() {
-        section = section.push(widget::text::heading("Site exceptions")).push(
+        let mut exceptions = widget::settings::section().title("Site exceptions").add(
             widget::button::standard("Reset all site permissions")
                 .on_press(Message::ResetAllSitePermissions),
         );
@@ -565,11 +579,12 @@ fn permissions_section(permissions: Permissions<'_>) -> Element<'_, Message> {
                 .push(revoke)
                 .align_y(Alignment::Center)
                 .spacing(spacing.space_xxs);
-            section = section.push(row);
+            exceptions = exceptions.add(row);
         }
+        sections.push(exceptions.into());
     }
 
-    section.into()
+    widget::settings::view_column(sections).into()
 }
 
 /// A labeled dropdown of integer choices that emits `on_change(value)`.
@@ -601,17 +616,16 @@ fn user_content_section<'a>(
     let spacing = libcosmic::theme::spacing();
     let scripts_dir = crate::user_content::scripts_dir();
 
-    let mut script_list = widget::column::with_capacity(scripts.len() + 4)
-        .push(widget::text::title4("User scripts"))
+    let mut script_list = widget::settings::section()
+        .title("User scripts")
         // Tell the user exactly where to drop .js files so they appear below.
-        .push(widget::text::caption(format!(
+        .add(widget::text::caption(format!(
             "Place .js files in {} — each becomes a user script that runs on every page.",
             scripts_dir.display()
-        )))
-        .spacing(spacing.space_xxs);
+        )));
 
     if scripts.is_empty() {
-        script_list = script_list.push(widget::text::caption("No user scripts found."));
+        script_list = script_list.add(widget::text::caption("No user scripts found."));
     }
     for entry in scripts {
         let name = entry.name.clone();
@@ -626,14 +640,14 @@ fn user_content_section<'a>(
             .push(remove)
             .align_y(Alignment::Center)
             .spacing(spacing.space_xxs);
-        script_list = script_list.push(row);
+        script_list = script_list.add(row);
     }
 
     let script_actions = widget::row::with_capacity(2)
         .push(widget::button::text("Open scripts folder").on_press(Message::OpenUserscriptsFolder))
         .push(widget::button::text("Refresh").on_press(Message::RefreshUserContent))
         .spacing(spacing.space_xxs);
-    script_list = script_list.push(script_actions);
+    script_list = script_list.add(script_actions);
 
     let stylesheet_toggle = widget::row::with_capacity(2)
         .push(widget::text("Apply user stylesheet (user.css)").width(Length::Fill))
@@ -643,31 +657,22 @@ fn user_content_section<'a>(
         )
         .align_y(Alignment::Center);
 
-    let stylesheet = widget::column::with_capacity(4)
-        .push(widget::text::title4("User stylesheet"))
-        .push(widget::text::caption(format!(
+    let stylesheet = widget::settings::section()
+        .title("User stylesheet")
+        .add(widget::text::caption(format!(
             "Edit {} to style every page.",
             crate::user_content::stylesheet_path().display()
         )))
-        .push(stylesheet_toggle)
-        .push(widget::button::text("Edit user.css").on_press(Message::OpenUserStylesheet))
-        .spacing(spacing.space_xxs);
-
-    widget::column::with_capacity(3)
-        .push(widget::text::title4("User content"))
-        .push(script_list)
-        .push(stylesheet)
-        .push(widget::text::caption(
+        .add(stylesheet_toggle)
+        .add(widget::button::text("Edit user.css").on_press(Message::OpenUserStylesheet))
+        .add(widget::text::caption(
             "Changes apply on the next page load — reload open tabs to see them.",
-        ))
-        .spacing(spacing.space_m)
-        .width(Length::Fill)
-        .into()
+        ));
+
+    widget::settings::view_column(vec![script_list.into(), stylesheet.into()]).into()
 }
 
 fn developer_section<'a>(config: &'a BrowserConfig, port_str: &'a str) -> Element<'a, Message> {
-    let spacing = libcosmic::theme::spacing();
-
     let enable_row = widget::row::with_capacity(2)
         .push(widget::text("Enable remote DevTools server").width(Length::Fill))
         .push(widget::toggler(config.devtools_enabled).on_toggle(Message::SetDevToolsEnabled))
@@ -682,15 +687,17 @@ fn developer_section<'a>(config: &'a BrowserConfig, port_str: &'a str) -> Elemen
         )
         .align_y(Alignment::Center);
 
-    widget::column::with_capacity(4)
-        .push(widget::text::title4("Developer Tools"))
-        .push(enable_row)
-        .push(port_row)
-        .push(widget::text::caption(
-            "Implements the Firefox Remote Debugging Protocol. \
-             Connect from Firefox DevTools → Remote Debugging → localhost:PORT. \
-             Changes take effect on the next startup.",
-        ))
-        .spacing(spacing.space_xxs)
-        .into()
+    widget::settings::view_column(vec![
+        widget::settings::section()
+            .title("Developer Tools")
+            .add(enable_row)
+            .add(port_row)
+            .add(widget::text::caption(
+                "Implements the Firefox Remote Debugging Protocol. \
+                 Connect from Firefox DevTools → Remote Debugging → localhost:PORT. \
+                 Changes take effect on the next startup.",
+            ))
+            .into(),
+    ])
+    .into()
 }

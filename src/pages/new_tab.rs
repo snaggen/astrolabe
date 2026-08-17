@@ -65,6 +65,8 @@ pub fn view<'a>(
 
     let grid = grid_view(top_sites, pinned, images, columns, rows, hovered);
 
+    // The window's translucent background is painted once, in `App::view`; this
+    // page only adds content on top of it.
     widget::column::with_capacity(3)
         .push(top_row)
         .push(search)
@@ -185,7 +187,7 @@ fn site_cell<'a>(
 
     let card = widget::container(body)
         .padding(spacing.space_xs)
-        .class(libcosmic::theme::Container::Card);
+        .class(crate::frosted::card());
 
     // Hover/click cover the whole card. Clicking the pin button captures the
     // press, so navigation only fires when the rest of the card is clicked.

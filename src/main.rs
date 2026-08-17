@@ -6,6 +6,7 @@ mod config;
 mod db;
 mod filter_engine;
 mod filter_lists;
+mod frosted;
 mod mpris;
 mod pages;
 mod tabs;

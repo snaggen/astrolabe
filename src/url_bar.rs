@@ -195,7 +195,7 @@ fn security_popup<'a>(security: SecurityStatus) -> Element<'a, Message> {
     widget::container(widget::text(body))
         .padding(12)
         .width(Length::Fixed(280.0))
-        .class(libcosmic::theme::Container::Dialog)
+        .class(libcosmic::theme::Container::Dialog(true))
         .into()
 }
 
@@ -293,7 +293,7 @@ fn cookie_popup<'a>(
 
     widget::container(column)
         .padding(12)
-        .class(libcosmic::theme::Container::Dialog)
+        .class(libcosmic::theme::Container::Dialog(true))
         .into()
 }
 
@@ -370,7 +370,7 @@ fn appearance_popup<'a>(
 
     widget::container(column)
         .padding(12)
-        .class(libcosmic::theme::Container::Dialog)
+        .class(libcosmic::theme::Container::Dialog(true))
         .into()
 }
 
@@ -438,7 +438,7 @@ fn permission_popup<'a>(permissions: Vec<PermissionEntry>) -> Element<'a, Messag
 
     widget::container(column)
         .padding(12)
-        .class(libcosmic::theme::Container::Dialog)
+        .class(libcosmic::theme::Container::Dialog(true))
         .into()
 }
 
@@ -549,7 +549,7 @@ fn zoom_popup<'a>(percent: i32) -> Element<'a, Message> {
 
     widget::container(column)
         .padding(12)
-        .class(libcosmic::theme::Container::Dialog)
+        .class(libcosmic::theme::Container::Dialog(true))
         .into()
 }
 
