@@ -23,7 +23,8 @@ use url::Url;
 
 use crate::config::{
     BUILTIN_ENGINES, BrowserConfig, ClearRange, CookieProtectionLevel, FilterListEntry,
-    PermissionDefault, PermissionKind, SearchEngine, StartupPage, extract_search_query,
+    PermissionDefault, PermissionKind, SearchEngine, StartupPage, ThemeChoice,
+    extract_search_query,
 };
 use crate::db::{
     BookmarkEntry, HistoryEntry, HistorySort, SitePermission, Suggestion, SuggestionKind,
@@ -291,11 +292,6 @@ fn servo_theme_from(is_dark: bool) -> cosmic_webview::Theme {
     }
 }
 
-/// The Servo theme matching the active COSMIC desktop theme.
-fn servo_theme() -> cosmic_webview::Theme {
-    servo_theme_from(libcosmic::theme::active().cosmic().is_dark)
-}
-
 /// Convert an iced logical size to the physical pixels the engine works in.
 fn logical_to_physical(size: Size, scale: f32) -> PhysicalSize<u32> {
     PhysicalSize::new(
@@ -452,6 +448,12 @@ pub enum Message {
     /// Set the active tab's per-site cookie-protection override (URL-bar popover).
     /// `None` removes the override, restoring the global default.
     SetCookieProtectionOverride(Option<CookieProtectionLevel>),
+    /// Set the theme web content sees on pages without an override of their own
+    /// (settings page).
+    SetThemePreference(ThemeChoice),
+    /// Set the active tab's per-site theme override (URL-bar popover).
+    /// `None` removes the override, restoring the global preference.
+    SetSiteThemeOverride(Option<ThemeChoice>),
     // ── Data clearing (settings drawer) ─────────────────────────────────────────
     /// Set the time range the "Clear browsing data" action applies to (history only).
     SetClearRange(ClearRange),
@@ -547,8 +549,8 @@ pub enum Message {
     FilterEnginesReady(std::sync::Arc<FilterEngines>),
     /// Filter engine build failed (logged, no blocking until next startup).
     FilterEnginesFailed(String),
-    /// Per-domain override loaded from DB after a navigation.
-    FilterOverrideLoaded(Option<CookieProtectionLevel>),
+    /// Every domain's stored overrides, read once when the database opens.
+    SiteSettingsLoaded(Vec<(String, crate::db::SiteSettings)>),
     /// Add a custom filter list URL.
     AddCustomFilterList(String),
     /// Remove a custom filter list by index.
@@ -703,6 +705,9 @@ pub struct App {
     /// mapping to `true` for allow and `false` for block. Loaded at startup and
     /// kept in sync with the `site_permissions` table for synchronous lookups.
     site_permissions: HashMap<(String, String), bool>,
+    /// Per-domain overrides of the global settings, keyed by host. Held in
+    /// memory so a navigation can apply them before the page is styled.
+    site_settings: HashMap<String, crate::db::SiteSettings>,
     /// Sorted view of `site_permissions` for the settings list: `(domain,
     /// feature_key, allow)`. Rebuilt whenever the grants change.
     permission_grants: Vec<(String, String, bool)>,
@@ -834,29 +839,23 @@ impl App {
             let search = self.config.search_engine.search_url(&raw);
             Url::parse(&search).expect("search engine URL must be valid")
         });
-        let domain = url.host_str().map(|h| h.to_owned());
         let url_str = url.to_string();
 
-        // Compute global default filter before the mutable borrow.
-        let global_filter = self
-            .filter_engines
-            .as_ref()
-            .map(|e| e.filter_fn(self.config.cookie_protection));
+        // Install the target site's overrides before the load starts, so the
+        // first paint already uses them.
+        let id = self.tabs.active();
+        self.apply_site_settings(id, url.host_str().map(str::to_owned));
 
-        let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
+        let Some(tab) = self.tabs.data_mut::<TabState>(id) else {
             return Task::none();
         };
         tab.url_bar_text = url_str;
         tab.url_bar_focused = false;
         tab.show_new_tab_page = false;
-        // Per-site override is cleared until we hear back from the DB lookup.
-        tab.cookie_protection_override = None;
         // Any unanswered request belongs to the old page. Session permission
         // decisions persist across navigations (they are keyed by domain).
         tab.pending_permission = None;
         tab.pending_bluetooth = None;
-        // Apply the global default filter while we wait for the DB lookup.
-        tab.servo.set_content_filter(global_filter);
         tab.servo.navigate(url);
 
         let focus_task = libcosmic::iced::widget::operation::focus_next();
@@ -872,20 +871,6 @@ impl App {
                     }
                 },
                 |_| libcosmic::action::app(Message::VisitLogged),
-            ));
-        }
-
-        // Look up any saved per-domain override and restore it.
-        if let (Some(domain), Some(conn)) = (domain, self.db.clone()) {
-            tasks.push(Task::perform(
-                async move { crate::db::load_site_setting(conn, domain).await },
-                |result| {
-                    let level = result.unwrap_or_else(|e| {
-                        tracing::warn!("Site setting lookup failed: {e}");
-                        None
-                    });
-                    libcosmic::action::app(Message::FilterOverrideLoaded(level))
-                },
             ));
         }
 
@@ -923,7 +908,8 @@ impl App {
     fn add_tab(&mut self, url: Url, show_new_tab_page: bool) -> segmented_button::Entity {
         let (mut tab, _rx) = TabState::new(url, self.current_size, self.scale);
         tab.show_new_tab_page = show_new_tab_page;
-        tab.servo.set_theme(servo_theme());
+        tab.servo
+            .set_theme_preference(self.config.theme_preference.preference());
         self.tabs.insert().closable().text("New Tab").data(tab).id()
     }
 
@@ -942,7 +928,8 @@ impl App {
             let blank = Url::parse("about:blank").expect("about:blank is always valid");
             let (mut tab, _rx) = TabState::new(blank, self.current_size, self.scale);
             tab.kind = TabKind::Settings;
-            tab.servo.set_theme(servo_theme());
+            tab.servo
+                .set_theme_preference(self.config.theme_preference.preference());
             self.tabs
                 .insert()
                 .closable()
@@ -1521,6 +1508,14 @@ impl App {
         self.user_scripts = crate::user_content::list_scripts(&self.config);
     }
 
+    /// Reload the page in the active tab, if it has one.
+    fn reload_active_tab(&mut self) {
+        if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+            tab.servo.reload();
+            tab.needs_reload = false;
+        }
+    }
+
     /// Apply an engine-level change (e.g. fonts) to existing pages: reload the
     /// active tab now and flag the rest to reload lazily when next shown, so we
     /// never reload many background tabs at once.
@@ -1543,6 +1538,118 @@ impl App {
     fn effective_level(&self, tab: &crate::tabs::TabState) -> CookieProtectionLevel {
         tab.cookie_protection_override
             .unwrap_or(self.config.cookie_protection)
+    }
+
+    /// Returns the theme a tab reports to its page: its per-site override if it
+    /// has one, otherwise the browser-wide preference.
+    fn effective_theme(&self, tab: &crate::tabs::TabState) -> ThemeChoice {
+        tab.theme_override.unwrap_or(self.config.theme_preference)
+    }
+
+    /// Apply `host`'s stored overrides to a tab, falling back to the global
+    /// settings where the site overrides nothing.
+    ///
+    /// Reads the in-memory table rather than the database, so a navigation the
+    /// browser starts itself can apply the overrides before telling the engine
+    /// to load the page.
+    ///
+    /// Returns `true` when this changed the theme the page is told to use, which
+    /// only takes full effect on the next load.
+    fn apply_site_settings(&mut self, id: segmented_button::Entity, host: Option<String>) -> bool {
+        let settings = host
+            .as_deref()
+            .and_then(|h| self.site_settings.get(h).copied())
+            .unwrap_or_default();
+        let level = settings
+            .cookie_protection
+            .unwrap_or(self.config.cookie_protection);
+        let filter = self.filter_engines.as_ref().map(|e| e.filter_fn(level));
+        let theme = settings.theme.unwrap_or(self.config.theme_preference);
+
+        let Some(tab) = self.tabs.data_mut::<TabState>(id) else {
+            return false;
+        };
+        let theme_changed = theme != tab.theme_override.unwrap_or(self.config.theme_preference);
+        tab.settings_domain = host;
+        tab.cookie_protection_override = settings.cookie_protection;
+        tab.theme_override = settings.theme;
+        tab.servo.set_content_filter(filter);
+        tab.servo.set_theme_preference(theme.preference());
+        theme_changed
+    }
+
+    /// Apply the active tab's overrides again when the page has moved to another
+    /// host, so links and startup URLs are treated like addresses the user typed.
+    ///
+    /// The engine reports such a navigation only once it is under way, too late
+    /// for the document that is already being styled — so a site whose theme
+    /// differs from the one the page loaded with is reloaded once.
+    fn sync_active_site_settings(&mut self) {
+        let id = self.tabs.active();
+        let Some(tab) = self.tabs.data::<TabState>(id) else {
+            return;
+        };
+        let host = tab
+            .servo
+            .current_url()
+            .and_then(|u| u.host_str().map(str::to_owned));
+        if host == tab.settings_domain {
+            return;
+        }
+
+        let has_page = host.is_some();
+        if self.apply_site_settings(id, host) && has_page {
+            self.reload_active_tab();
+        }
+    }
+
+    /// Record the active tab's per-site overrides, in memory and in the database.
+    /// Does nothing for pages without a host (e.g. `about:blank`).
+    fn store_active_site_settings(&mut self) -> Task<Message> {
+        let Some(tab) = self.tabs.active_data::<TabState>() else {
+            return Task::none();
+        };
+        let settings = crate::db::SiteSettings {
+            cookie_protection: tab.cookie_protection_override,
+            theme: tab.theme_override,
+        };
+        let Some(domain) = tab
+            .servo
+            .current_url()
+            .and_then(|u| u.host_str().map(str::to_owned))
+        else {
+            return Task::none();
+        };
+
+        if settings == crate::db::SiteSettings::default() {
+            self.site_settings.remove(&domain);
+        } else {
+            self.site_settings.insert(domain.clone(), settings);
+        }
+
+        let Some(conn) = self.db.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                if let Err(e) = crate::db::save_site_settings(conn, domain, settings).await {
+                    tracing::warn!("Failed to update site settings: {e}");
+                }
+            },
+            |()| libcosmic::action::app(Message::VisitLogged),
+        )
+    }
+
+    /// Push each tab's effective theme into its engine, so `prefers-color-scheme`
+    /// follows a changed preference without a reload.
+    fn apply_theme_to_all_tabs(&mut self) {
+        let ids: Vec<_> = self.tabs.iter().collect();
+        for id in ids {
+            if let Some(tab) = self.tabs.data::<TabState>(id) {
+                tab.servo
+                    .set_theme_preference(self.effective_theme(tab).preference());
+            }
+        }
     }
 
     /// Install the correct content filter on a tab based on its effective level.
@@ -1692,7 +1799,7 @@ impl Hash for MprisRx {
 
 impl libcosmic::Application for App {
     type Executor = executor::Default;
-    type Flags = Option<Url>;
+    type Flags = crate::cli::Cli;
     type Message = Message;
 
     const APP_ID: &'static str = "io.github.snaggen.CosmicWeb";
@@ -1705,7 +1812,7 @@ impl libcosmic::Application for App {
         &mut self.core
     }
 
-    fn init(core: Core, flags: Option<Url>) -> (Self, Task<Message>) {
+    fn init(core: Core, flags: crate::cli::Cli) -> (Self, Task<Message>) {
         let scale = std::env::var("COSMIC_SCALE")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
@@ -1730,8 +1837,12 @@ impl libcosmic::Application for App {
         cosmic_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
         // Apply web-content fonts before the engine starts.
         cosmic_webview::set_web_fonts(config.web_fonts());
-        // Enable the remote devtools server if configured (must be before first tab).
-        if config.devtools_enabled {
+        // Enable the remote devtools server if configured (must be before first
+        // tab). `--devtools-port` turns it on for this session whatever the
+        // setting says, without changing the stored configuration.
+        if let Some(port) = flags.devtools_port {
+            cosmic_webview::set_devtools_enabled(port);
+        } else if config.devtools_enabled {
             cosmic_webview::set_devtools_enabled(config.devtools_port);
         }
         // Apply user scripts / stylesheet before the engine starts so the first
@@ -1753,14 +1864,16 @@ impl libcosmic::Application for App {
         });
 
         // A command-line URL overrides the configured startup page.
-        let (initial_url, show_new_tab_page) = match flags {
+        let (initial_url, show_new_tab_page) = match flags.url {
             Some(url) => (url, false),
             None => resolve_page(&config.startup_page),
         };
 
         let (mut first_tab, servo_rx) = TabState::new(initial_url, initial_size, scale);
         first_tab.show_new_tab_page = show_new_tab_page;
-        first_tab.servo.set_theme(servo_theme());
+        first_tab
+            .servo
+            .set_theme_preference(config.theme_preference.preference());
 
         let mut tabs = segmented_button::SingleSelectModel::default();
         let first_id = tabs
@@ -1822,6 +1935,7 @@ impl libcosmic::Application for App {
             site_data_domains: Vec::new(),
             clear_confirm_open: false,
             site_permissions: HashMap::new(),
+            site_settings: HashMap::new(),
             permission_grants: Vec::new(),
             session_permissions: HashMap::new(),
             info_dialog_message: None,
@@ -1925,8 +2039,13 @@ impl libcosmic::Application for App {
         Subscription::batch(subs)
     }
 
-    /// Push the new light/dark theme into every tab's engine so web content's
-    /// `prefers-color-scheme` follows the desktop without a reload.
+    /// Push the new desktop light/dark theme into the engines of tabs that follow
+    /// it, so their `prefers-color-scheme` changes without a reload. Tabs on a
+    /// forced Light/Dark theme are left alone.
+    ///
+    /// The theme is taken from `new_theme` rather than resolved through
+    /// [`ThemeChoice::preference`]: the global `libcosmic::theme::active()` this
+    /// callback announces has not necessarily been updated yet.
     fn system_theme_update(
         &mut self,
         _keys: &[&'static str],
@@ -1935,7 +2054,9 @@ impl libcosmic::Application for App {
         let theme = servo_theme_from(new_theme.is_dark);
         let ids: Vec<_> = self.tabs.iter().collect();
         for id in ids {
-            if let Some(tab) = self.tabs.data::<TabState>(id) {
+            if let Some(tab) = self.tabs.data::<TabState>(id)
+                && self.effective_theme(tab) == ThemeChoice::System
+            {
                 tab.servo.set_theme(theme);
             }
         }
@@ -2092,7 +2213,7 @@ impl libcosmic::Application for App {
                 if !adopted.is_empty() {
                     let mut new_id = None;
                     for servo in adopted {
-                        servo.set_theme(servo_theme());
+                        servo.set_theme_preference(self.config.theme_preference.preference());
                         let url_bar_text = servo
                             .current_url()
                             .map(|u| u.to_string())
@@ -2127,6 +2248,10 @@ impl libcosmic::Application for App {
 
                 // Mirror the active tab's media state to the desktop (MPRIS).
                 self.publish_media();
+
+                // Following a link can move the tab to another site, which has
+                // per-site overrides of its own.
+                self.sync_active_site_settings();
 
                 let mut tasks = Vec::new();
 
@@ -2755,11 +2880,6 @@ impl libcosmic::Application for App {
             }
             Message::SetCookieProtectionOverride(override_level) => {
                 self.url_bar_popover = None;
-                let domain = self
-                    .tabs
-                    .active_data::<TabState>()
-                    .and_then(|t| t.servo.current_url())
-                    .and_then(|u| u.host_str().map(|h| h.to_owned()));
 
                 // Effective level: override if set, otherwise global default.
                 let effective = override_level.unwrap_or(self.config.cookie_protection);
@@ -2768,24 +2888,30 @@ impl libcosmic::Application for App {
                     tab.cookie_protection_override = override_level;
                     tab.servo.set_content_filter(filter);
                 }
+                // Requests already made were not filtered; reload so the level
+                // applies to the whole page.
+                let stored = self.store_active_site_settings();
+                self.reload_active_tab();
+                return stored;
+            }
+            Message::SetThemePreference(choice) => {
+                self.write_config(|c, h| c.set_theme_preference(h, choice));
+                self.apply_theme_to_all_tabs();
+                self.reload_active_flag_others();
+            }
+            Message::SetSiteThemeOverride(override_choice) => {
+                self.url_bar_popover = None;
 
-                // Persist to DB: save if override is set, delete if reset.
-                if let (Some(domain), Some(conn)) = (domain, self.db.clone()) {
-                    return Task::perform(
-                        async move {
-                            let result = match override_level {
-                                Some(level) => {
-                                    crate::db::save_site_setting(conn, domain, level).await
-                                }
-                                None => crate::db::delete_site_setting(conn, domain).await,
-                            };
-                            if let Err(e) = result {
-                                tracing::warn!("Failed to update site setting: {e}");
-                            }
-                        },
-                        |_| libcosmic::action::app(Message::VisitLogged),
-                    );
+                let effective = override_choice.unwrap_or(self.config.theme_preference);
+                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
+                    tab.theme_override = override_choice;
+                    tab.servo.set_theme_preference(effective.preference());
                 }
+                // Pages that pick their colours at load time (rather than from a
+                // live media query) only follow the new theme after a reload.
+                let stored = self.store_active_site_settings();
+                self.reload_active_tab();
+                return stored;
             }
             // ── Data clearing ───────────────────────────────────────────────────
             Message::SetClearRange(range) => self.clear_range = range,
@@ -2938,14 +3064,19 @@ impl libcosmic::Application for App {
             Message::FilterEnginesFailed(reason) => {
                 tracing::warn!("Content filter engine build failed: {reason}");
             }
-            Message::FilterOverrideLoaded(level) => {
-                let effective = level.unwrap_or(self.config.cookie_protection);
-                let filter = self.filter_engines.as_ref().map(|e| e.filter_fn(effective));
-                if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
-                    tab.cookie_protection_override = level;
-                    if let Some(f) = filter {
-                        tab.servo.set_content_filter(Some(f));
-                    }
+            Message::SiteSettingsLoaded(entries) => {
+                self.site_settings = entries.into_iter().collect();
+                // The startup page loads before the database is open, so the
+                // first tab may need its overrides applied after the fact.
+                let id = self.tabs.active();
+                let host = self
+                    .tabs
+                    .data::<TabState>(id)
+                    .and_then(|t| t.servo.current_url())
+                    .and_then(|u| u.host_str().map(str::to_owned));
+                let has_page = host.is_some();
+                if self.apply_site_settings(id, host) && has_page {
+                    self.reload_active_tab();
                 }
             }
             Message::CustomFilterListUrlChanged(url) => {
@@ -2997,7 +3128,13 @@ impl libcosmic::Application for App {
             }
             // ── Config ────────────────────────────────────────────────────────
             Message::ConfigChanged(config) => {
+                // The theme is pushed into the engines, so a change made outside
+                // this window (another instance, an editor) has to be applied too.
+                let theme_changed = config.theme_preference != self.config.theme_preference;
                 self.config = config;
+                if theme_changed {
+                    self.apply_theme_to_all_tabs();
+                }
             }
 
             // ── Database ──────────────────────────────────────────────────────
@@ -3017,7 +3154,10 @@ impl libcosmic::Application for App {
                     },
                 );
                 let init_permissions = Task::perform(
-                    async move { crate::db::query_site_permissions(conn).await },
+                    {
+                        let conn = conn.clone();
+                        async move { crate::db::query_site_permissions(conn).await }
+                    },
                     |result| match result {
                         Ok(entries) => {
                             libcosmic::action::app(Message::SitePermissionsLoaded(entries))
@@ -3028,9 +3168,20 @@ impl libcosmic::Application for App {
                         }
                     },
                 );
+                let init_site_settings = Task::perform(
+                    async move { crate::db::query_site_settings(conn).await },
+                    |result| match result {
+                        Ok(entries) => libcosmic::action::app(Message::SiteSettingsLoaded(entries)),
+                        Err(e) => {
+                            tracing::warn!("Failed to load site settings: {e}");
+                            libcosmic::action::app(Message::SiteSettingsLoaded(vec![]))
+                        }
+                    },
+                );
                 return Task::batch(vec![
                     init_bookmarks,
                     init_permissions,
+                    init_site_settings,
                     self.reload_new_tab(),
                 ]);
             }
@@ -3520,6 +3671,8 @@ impl libcosmic::Application for App {
             security: SecurityStatus::from_url(&current_url),
             cookie_override: tab.cookie_protection_override,
             global_cookie_level: self.config.cookie_protection,
+            theme_override: tab.theme_override,
+            global_theme: self.config.theme_preference,
             permissions: self.permission_entries(),
             is_bookmarked: self.bookmarked_urls.contains(&current_url),
             zoom: tab.servo.page_zoom(),

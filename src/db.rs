@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use turso::{Builder, Connection};
+
+use crate::config::{CookieProtectionLevel, ThemeChoice};
 
 /// A history entry as stored in the database.
 #[derive(Clone, Debug)]
@@ -23,24 +26,36 @@ pub enum HistorySort {
     MostVisited,
 }
 
-/// Path to the shared profile directory under the XDG data directory.
+/// Profile directory chosen with `--profile-dir`, if any.
+static PROFILE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Use `dir` as the profile directory instead of the XDG data directory.
+///
+/// Call before the first [`profile_dir`]; a later call is ignored so the
+/// directory cannot change while the browser is running.
+pub fn set_profile_dir(dir: PathBuf) {
+    if PROFILE_DIR.set(dir).is_err() {
+        tracing::warn!("Profile directory already in use; ignoring override");
+    }
+}
+
+/// Path to the shared profile directory, `--profile-dir` or the XDG data one.
 ///
 /// Creates the directory if it does not exist. Servo uses this path for
 /// `cookie_jar.json`, `hsts_list.json`, and `auth_cache.json`.
 pub fn profile_dir() -> PathBuf {
-    let dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("cosmic-web");
+    let dir = PROFILE_DIR.get().cloned().unwrap_or_else(|| {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("cosmic-web")
+    });
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
 
-/// Path to the browser database file under the XDG data directory.
+/// Path to the browser database file inside the profile directory.
 pub fn db_path() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("cosmic-web")
-        .join("browser.db")
+    profile_dir().join("browser.db")
 }
 
 /// Open (or create) the database at `path` and return a ready connection.
@@ -82,6 +97,7 @@ async fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS site_settings (
             domain              TEXT    NOT NULL PRIMARY KEY,
             cookie_protection   TEXT    NOT NULL,
+            theme               TEXT    NOT NULL DEFAULT '',
             updated_at          INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS site_permissions (
@@ -94,12 +110,18 @@ async fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     )
     .await?;
 
-    // Migrate databases created before the `folder` column existed. SQLite has
-    // no `ADD COLUMN IF NOT EXISTS`, so the statement errors with "duplicate
+    // Migrate databases created before these columns existed. SQLite has no
+    // `ADD COLUMN IF NOT EXISTS`, so each statement errors with "duplicate
     // column" on already-migrated databases — that error is expected and ignored.
     let _ = conn
         .execute(
             "ALTER TABLE bookmarks ADD COLUMN folder TEXT NOT NULL DEFAULT ''",
+            (),
+        )
+        .await;
+    let _ = conn
+        .execute(
+            "ALTER TABLE site_settings ADD COLUMN theme TEXT NOT NULL DEFAULT ''",
             (),
         )
         .await;
@@ -485,58 +507,112 @@ pub async fn load_bookmarked_urls(conn: Connection) -> anyhow::Result<HashSet<St
 
 // ── Site settings ─────────────────────────────────────────────────────────────
 
-/// Persist a per-domain cookie-protection override.
-pub async fn save_site_setting(
+/// Per-domain overrides of browser-wide settings. `None` in a field means the
+/// site follows the global setting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SiteSettings {
+    pub cookie_protection: Option<CookieProtectionLevel>,
+    pub theme: Option<ThemeChoice>,
+}
+
+impl SiteSettings {
+    /// True when the site overrides nothing, i.e. its row can be dropped.
+    fn is_empty(&self) -> bool {
+        self.cookie_protection.is_none() && self.theme.is_none()
+    }
+}
+
+/// The empty string stands for "no override" in the `site_settings` columns,
+/// which are `NOT NULL` and were written before overrides could be absent.
+fn cookie_to_db(level: Option<CookieProtectionLevel>) -> &'static str {
+    match level {
+        Some(CookieProtectionLevel::Standard) => "Standard",
+        Some(CookieProtectionLevel::Strict) => "Strict",
+        None => "",
+    }
+}
+
+fn cookie_from_db(value: &str) -> Option<CookieProtectionLevel> {
+    match value {
+        "Standard" => Some(CookieProtectionLevel::Standard),
+        "Strict" => Some(CookieProtectionLevel::Strict),
+        _ => None,
+    }
+}
+
+fn theme_to_db(theme: Option<ThemeChoice>) -> &'static str {
+    match theme {
+        Some(ThemeChoice::System) => "System",
+        Some(ThemeChoice::Light) => "Light",
+        Some(ThemeChoice::Dark) => "Dark",
+        None => "",
+    }
+}
+
+fn theme_from_db(value: &str) -> Option<ThemeChoice> {
+    match value {
+        "System" => Some(ThemeChoice::System),
+        "Light" => Some(ThemeChoice::Light),
+        "Dark" => Some(ThemeChoice::Dark),
+        _ => None,
+    }
+}
+
+/// Persist a domain's overrides, dropping the row once nothing is overridden.
+pub async fn save_site_settings(
     conn: Connection,
     domain: String,
-    level: crate::config::CookieProtectionLevel,
+    settings: SiteSettings,
 ) -> anyhow::Result<()> {
-    let level_str = match level {
-        crate::config::CookieProtectionLevel::Standard => "Standard",
-        crate::config::CookieProtectionLevel::Strict => "Strict",
-    };
-    conn.execute(
-        "INSERT INTO site_settings (domain, cookie_protection, updated_at)
-         VALUES (?1, ?2, unixepoch())
-         ON CONFLICT(domain) DO UPDATE SET
-             cookie_protection = excluded.cookie_protection,
-             updated_at        = excluded.updated_at",
-        (domain.as_str(), level_str),
-    )
-    .await?;
-    Ok(())
-}
-
-/// Remove the per-domain cookie-protection override, restoring the global default.
-pub async fn delete_site_setting(conn: Connection, domain: String) -> anyhow::Result<()> {
-    conn.execute(
-        "DELETE FROM site_settings WHERE domain = ?1",
-        (domain.as_str(),),
-    )
-    .await?;
-    Ok(())
-}
-
-/// Load the per-domain cookie-protection override, if any.
-pub async fn load_site_setting(
-    conn: Connection,
-    domain: String,
-) -> anyhow::Result<Option<crate::config::CookieProtectionLevel>> {
-    let mut rows = conn
-        .query(
-            "SELECT cookie_protection FROM site_settings WHERE domain = ?1",
+    if settings.is_empty() {
+        conn.execute(
+            "DELETE FROM site_settings WHERE domain = ?1",
             (domain.as_str(),),
         )
         .await?;
-    if let Some(row) = rows.next().await? {
-        let s: String = row.get(0)?;
-        let level = match s.as_str() {
-            "Strict" => crate::config::CookieProtectionLevel::Strict,
-            _ => crate::config::CookieProtectionLevel::Standard,
-        };
-        return Ok(Some(level));
+        return Ok(());
     }
-    Ok(None)
+
+    conn.execute(
+        "INSERT INTO site_settings (domain, cookie_protection, theme, updated_at)
+         VALUES (?1, ?2, ?3, unixepoch())
+         ON CONFLICT(domain) DO UPDATE SET
+             cookie_protection = excluded.cookie_protection,
+             theme             = excluded.theme,
+             updated_at        = excluded.updated_at",
+        (
+            domain.as_str(),
+            cookie_to_db(settings.cookie_protection),
+            theme_to_db(settings.theme),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Load every domain's overrides.
+///
+/// The table holds exceptions only, so the whole thing is kept in memory and
+/// consulted synchronously — a per-navigation query would answer after the page
+/// had already been styled.
+pub async fn query_site_settings(conn: Connection) -> anyhow::Result<Vec<(String, SiteSettings)>> {
+    let mut rows = conn
+        .query(
+            "SELECT domain, cookie_protection, theme FROM site_settings",
+            (),
+        )
+        .await?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().await? {
+        entries.push((
+            row.get::<String>(0)?,
+            SiteSettings {
+                cookie_protection: cookie_from_db(&row.get::<String>(1)?),
+                theme: theme_from_db(&row.get::<String>(2)?),
+            },
+        ));
+    }
+    Ok(entries)
 }
 
 // ── Per-site permissions ──────────────────────────────────────────────────────
@@ -783,6 +859,87 @@ mod tests {
 
             clear_all_site_permissions(conn.clone()).await?;
             assert!(query_site_permissions(conn).await?.is_empty());
+            Ok(())
+        })
+    }
+
+    /// The overrides of the single domain expected to be stored.
+    async fn only_entry(conn: Connection, domain: &str) -> anyhow::Result<SiteSettings> {
+        let entries = query_site_settings(conn).await?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, domain);
+        Ok(entries[0].1)
+    }
+
+    #[test]
+    fn site_settings_round_trip_each_override_separately() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            let conn = temp_db().await?;
+            let domain = "example.com".to_owned();
+
+            // An unknown domain overrides nothing.
+            assert!(query_site_settings(conn.clone()).await?.is_empty());
+
+            // A theme-only override leaves cookie protection on the global default.
+            save_site_settings(
+                conn.clone(),
+                domain.clone(),
+                SiteSettings {
+                    cookie_protection: None,
+                    theme: Some(ThemeChoice::Dark),
+                },
+            )
+            .await?;
+            let loaded = only_entry(conn.clone(), &domain).await?;
+            assert_eq!(loaded.theme, Some(ThemeChoice::Dark));
+            assert_eq!(loaded.cookie_protection, None);
+
+            // Adding the other override keeps the first one.
+            save_site_settings(
+                conn.clone(),
+                domain.clone(),
+                SiteSettings {
+                    cookie_protection: Some(CookieProtectionLevel::Strict),
+                    theme: Some(ThemeChoice::Dark),
+                },
+            )
+            .await?;
+            let loaded = only_entry(conn.clone(), &domain).await?;
+            assert_eq!(
+                loaded,
+                SiteSettings {
+                    cookie_protection: Some(CookieProtectionLevel::Strict),
+                    theme: Some(ThemeChoice::Dark),
+                }
+            );
+
+            // Clearing both drops the row entirely.
+            save_site_settings(conn.clone(), domain.clone(), SiteSettings::default()).await?;
+            let mut rows = conn.query("SELECT COUNT(*) FROM site_settings", ()).await?;
+            let count: i64 = rows.next().await?.expect("count row").get(0)?;
+            assert_eq!(count, 0);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn site_settings_are_kept_per_domain() -> anyhow::Result<()> {
+        pollster::block_on(async {
+            let conn = temp_db().await?;
+            save_site_settings(
+                conn.clone(),
+                "a.example".into(),
+                SiteSettings {
+                    cookie_protection: None,
+                    theme: Some(ThemeChoice::Light),
+                },
+            )
+            .await?;
+
+            // Only the domain that was written is listed at all.
+            let entries = query_site_settings(conn).await?;
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, "a.example");
             Ok(())
         })
     }

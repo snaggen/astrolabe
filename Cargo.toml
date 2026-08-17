@@ -32,6 +32,7 @@ adblock = { version = "0.12", default-features = false, features = ["embedded-do
 serde_json = "1"
 # Matches the image version cosmic-webview's screenshot() returns (RgbaImage).
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+clap = { version = "4.6.6", features = ["derive"] }
 
 [dev-dependencies]
 pollster = "0.4"

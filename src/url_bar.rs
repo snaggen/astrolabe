@@ -6,7 +6,7 @@ use libcosmic::prelude::*;
 use libcosmic::widget;
 
 use crate::app::{Message, PermissionResponse};
-use crate::config::{BUILTIN_ENGINES, CookieProtectionLevel, SearchEngine};
+use crate::config::{BUILTIN_ENGINES, CookieProtectionLevel, SearchEngine, ThemeChoice};
 use crate::db::{Suggestion, SuggestionKind};
 
 /// A permission decision for the active site, shown in the permissions popover.
@@ -57,6 +57,7 @@ impl SecurityStatus {
 pub enum UrlBarPopover {
     Security,
     Cookie,
+    Appearance,
     Permissions,
     Zoom,
 }
@@ -81,6 +82,11 @@ pub struct AddressBar<'a> {
     pub cookie_override: Option<CookieProtectionLevel>,
     /// The browser-wide default protection level (from settings).
     pub global_cookie_level: CookieProtectionLevel,
+    /// Per-site theme override for the active tab, if any. `None` means the
+    /// global preference applies.
+    pub theme_override: Option<ThemeChoice>,
+    /// The browser-wide theme preference for web content (from settings).
+    pub global_theme: ThemeChoice,
     /// Permission decisions (allow/block, session/persistent) for the active
     /// site; the indicator is hidden when empty.
     pub permissions: Vec<PermissionEntry>,
@@ -115,15 +121,19 @@ impl<'a> AddressBar<'a> {
                 self.open_popover,
             )
         });
+        let appearance = is_web_page.then(|| {
+            appearance_indicator(self.theme_override, self.global_theme, self.open_popover)
+        });
 
         // The row keeps a fixed slot layout: absent indicators render as a
         // zero-size placeholder. This keeps the text input at a constant child
         // index so iced never reconciles its widget state against a sibling's
         // (which panics in `TextInput::layout`).
-        let row = widget::row::with_capacity(6)
+        let row = widget::row::with_capacity(7)
             .align_y(Alignment::Center)
             .push(slot(security_indicator(self.security, self.open_popover)))
             .push(slot(cookie))
+            .push(slot(appearance))
             .push(slot(permission_indicator(
                 self.permissions,
                 self.open_popover,
@@ -280,6 +290,83 @@ fn cookie_popup<'a>(
         .push(widget::text::body("Tracking protection for this site"))
         .push(dropdown)
         .push(widget::text::caption(description));
+
+    widget::container(column)
+        .padding(12)
+        .class(libcosmic::theme::Container::Dialog)
+        .into()
+}
+
+/// The appearance indicator: a clickable icon showing which colour scheme this
+/// site is told to use, with a popover for choosing it per site.
+fn appearance_indicator<'a>(
+    theme_override: Option<ThemeChoice>,
+    global: ThemeChoice,
+    open: Option<UrlBarPopover>,
+) -> Element<'a, Message> {
+    let effective = theme_override.unwrap_or(global);
+    let tip = if theme_override.is_some() {
+        format!("Appearance: {} (site override)", effective.label())
+    } else {
+        format!("Appearance: {}", effective.label())
+    };
+
+    let icon_name = match effective {
+        ThemeChoice::System => "display-brightness-symbolic",
+        ThemeChoice::Light => "weather-clear-symbolic",
+        ThemeChoice::Dark => "weather-clear-night-symbolic",
+    };
+    let button = widget::button::icon(widget::icon::from_name(icon_name))
+        .on_press(Message::ToggleUrlBarPopover(UrlBarPopover::Appearance));
+    let anchor = widget::tooltip(button, widget::text(tip), widget::tooltip::Position::Bottom);
+
+    let mut popover = widget::popover(anchor)
+        .position(widget::popover::Position::Bottom)
+        .on_close(Message::CloseUrlBarPopover);
+    if open == Some(UrlBarPopover::Appearance) {
+        popover = popover.popup(appearance_popup(theme_override, global));
+    }
+    popover.into()
+}
+
+/// Dropdown choices for the per-site theme: index 0 = use the global
+/// preference, indices 1–3 map to the [`ThemeChoice`] variants.
+const THEME_OPTIONS: &[Option<ThemeChoice>] = &[
+    None,
+    Some(ThemeChoice::System),
+    Some(ThemeChoice::Light),
+    Some(ThemeChoice::Dark),
+];
+
+/// Popover body: dropdown to pick what `prefers-color-scheme` reports on this
+/// site. Choosing "Default" removes the override and follows the global
+/// preference again.
+fn appearance_popup<'a>(
+    theme_override: Option<ThemeChoice>,
+    global: ThemeChoice,
+) -> Element<'a, Message> {
+    let labels: Vec<String> = THEME_OPTIONS
+        .iter()
+        .map(|&opt| match opt {
+            None => format!("Default ({})", global.label()),
+            Some(choice) => choice.label().to_owned(),
+        })
+        .collect();
+    let selected = THEME_OPTIONS.iter().position(|&o| o == theme_override);
+
+    let dropdown = widget::dropdown(labels, selected, |i| {
+        Message::SetSiteThemeOverride(THEME_OPTIONS.get(i).copied().flatten())
+    });
+
+    let column = widget::column::with_capacity(3)
+        .spacing(10)
+        .width(Length::Fixed(280.0))
+        .push(widget::text::body("Appearance for this site"))
+        .push(dropdown)
+        .push(widget::text::caption(
+            "Chooses what pages see in prefers-color-scheme. Sites that ignore \
+             it keep their own colors.",
+        ));
 
     widget::container(column)
         .padding(12)

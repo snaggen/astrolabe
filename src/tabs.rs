@@ -44,6 +44,12 @@ pub struct TabState {
     /// Per-site cookie-protection level chosen via the URL-bar indicator, or
     /// `None` to follow the global default. Reset when the tab navigates.
     pub cookie_protection_override: Option<crate::config::CookieProtectionLevel>,
+    /// Per-site `prefers-color-scheme` chosen via the URL-bar indicator, or
+    /// `None` to follow the global preference. Reset when the tab navigates.
+    pub theme_override: Option<crate::config::ThemeChoice>,
+    /// Host the overrides above were loaded for. Compared against the page's
+    /// host on every engine wake to notice that the tab moved to another site.
+    pub settings_domain: Option<String>,
     /// A permission request from the page awaiting the user's allow/deny choice.
     /// At most one is shown at a time; a newer request replaces an unanswered one.
     pub pending_permission: Option<PermissionRequest>,
@@ -85,6 +91,8 @@ impl TabState {
             show_new_tab_page: false,
             thumb_captured_url: None,
             cookie_protection_override: None,
+            theme_override: None,
+            settings_domain: None,
             pending_permission: None,
             pending_bluetooth: None,
             needs_reload: false,

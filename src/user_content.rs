@@ -10,8 +10,12 @@
 //! drop new ones.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::config::BrowserConfig;
+
+/// Script directory chosen with `--userscripts`, if any.
+static SCRIPTS_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The `cosmic-web` config directory (created lazily by callers that write).
 fn base_dir() -> PathBuf {
@@ -20,9 +24,22 @@ fn base_dir() -> PathBuf {
         .join("cosmic-web")
 }
 
+/// Read user scripts from `dir` instead of from the config directory.
+///
+/// Call before the first [`scripts_dir`]; a later call is ignored so the
+/// directory cannot change while the browser is running.
+pub fn set_scripts_dir(dir: PathBuf) {
+    if SCRIPTS_DIR.set(dir).is_err() {
+        tracing::warn!("User-script directory already in use; ignoring override");
+    }
+}
+
 /// Directory holding `*.js` user scripts.
 pub fn scripts_dir() -> PathBuf {
-    base_dir().join("userscripts")
+    SCRIPTS_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| base_dir().join("userscripts"))
 }
 
 /// Path of the user stylesheet file.

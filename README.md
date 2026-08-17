@@ -52,6 +52,18 @@ cargo run
 LIBGL_ALWAYS_SOFTWARE=1 cargo run
 ```
 
+## Command line
+
+```
+cosmic-web [OPTIONS] [URL]
+
+      --profile-dir <DIR>     Cookies, history and other profile data
+      --userscripts <DIR>     Directory to read *.js user scripts from
+      --devtools-port <PORT>  Run the devtools server on PORT for this session
+```
+
+Everything else is configured in the browser's settings.
+
 Install to `~/.local` (creates desktop entry and icon):
 
 ```bash

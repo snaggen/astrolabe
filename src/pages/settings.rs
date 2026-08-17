@@ -6,7 +6,7 @@ use libcosmic::widget::segmented_button;
 use crate::app::Message;
 use crate::config::{
     BUILTIN_ENGINES, BrowserConfig, ClearRange, CookieProtectionLevel, PermissionDefault,
-    PermissionDefaults, PermissionKind, SearchEngine, StartupPage,
+    PermissionDefaults, PermissionKind, SearchEngine, StartupPage, ThemeChoice,
 };
 
 /// Selectable column counts for the New Tab grid.
@@ -114,8 +114,8 @@ pub enum SettingsSection {
     Privacy,
     /// Per-site permission defaults and exceptions.
     Permissions,
-    /// Default web-content fonts.
-    Fonts,
+    /// Color scheme and default fonts for web content.
+    Appearance,
     /// Clear browsing data.
     ClearData,
     /// User scripts and user stylesheet.
@@ -130,7 +130,7 @@ impl SettingsSection {
         SettingsSection::General,
         SettingsSection::Privacy,
         SettingsSection::Permissions,
-        SettingsSection::Fonts,
+        SettingsSection::Appearance,
         SettingsSection::ClearData,
         SettingsSection::UserContent,
         SettingsSection::Developer,
@@ -142,7 +142,7 @@ impl SettingsSection {
             SettingsSection::General => "General",
             SettingsSection::Privacy => "Privacy",
             SettingsSection::Permissions => "Permissions",
-            SettingsSection::Fonts => "Fonts",
+            SettingsSection::Appearance => "Appearance",
             SettingsSection::ClearData => "Clear data",
             SettingsSection::UserContent => "User content",
             SettingsSection::Developer => "Developer",
@@ -175,7 +175,7 @@ pub fn view<'a>(
         SettingsSection::General => general_section(config),
         SettingsSection::Privacy => privacy_section(config, filter_list_url),
         SettingsSection::Permissions => permissions_section(permissions),
-        SettingsSection::Fonts => fonts_section(config),
+        SettingsSection::Appearance => appearance_section(config),
         SettingsSection::ClearData => data_clearing_section(clearing),
         SettingsSection::UserContent => user_content_section(config, user_scripts),
         SettingsSection::Developer => developer_section(config, devtools_port_str),
@@ -375,11 +375,28 @@ fn font_size_row<'a>(
         .into()
 }
 
-/// Build the "Fonts" section: default serif/sans-serif/monospace families and
-/// base sizes for web content (like a browser's font settings).
-fn fonts_section(config: &BrowserConfig) -> Element<'_, Message> {
+/// Build the "Appearance" section: the colour scheme reported to pages, and the
+/// default serif/sans-serif/monospace families and base sizes for web content.
+fn appearance_section(config: &BrowserConfig) -> Element<'_, Message> {
     let spacing = libcosmic::theme::spacing();
-    widget::column::with_capacity(7)
+    let theme_labels: Vec<&str> = ThemeChoice::ALL.iter().map(ThemeChoice::label).collect();
+    let theme_selected = ThemeChoice::ALL
+        .iter()
+        .position(|&c| c == config.theme_preference);
+    let theme_row = widget::row::with_capacity(2)
+        .push(widget::text("Color scheme").width(Length::Fill))
+        .push(widget::dropdown(theme_labels, theme_selected, |i| {
+            Message::SetThemePreference(ThemeChoice::ALL.get(i).copied().unwrap_or_default())
+        }))
+        .align_y(Alignment::Center);
+
+    widget::column::with_capacity(10)
+        .push(widget::text::title4("Color scheme"))
+        .push(widget::text::caption(
+            "What pages see in prefers-color-scheme. Individual sites can be \
+             overridden from the address bar.",
+        ))
+        .push(theme_row)
         .push(widget::text::title4("Fonts"))
         .push(widget::text::caption(
             "Default fonts for web pages. Leave a family blank to use the engine default.",

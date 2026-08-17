@@ -171,6 +171,42 @@ impl CookieProtectionLevel {
     }
 }
 
+/// How web content's `prefers-color-scheme` is decided.
+///
+/// Applies to pages only — the browser's own chrome always follows the COSMIC
+/// desktop theme.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ThemeChoice {
+    /// Follow the COSMIC desktop light/dark setting.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeChoice {
+    /// Human-readable label shown in the settings and the site popover.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::System => "Match the desktop",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// The engine preference this choice maps to.
+    pub fn preference(self) -> cosmic_webview::ThemePreference {
+        match self {
+            Self::System => cosmic_webview::ThemePreference::FollowSystem,
+            Self::Light => cosmic_webview::ThemePreference::Light,
+            Self::Dark => cosmic_webview::ThemePreference::Dark,
+        }
+    }
+
+    /// All variants in dropdown order.
+    pub const ALL: [ThemeChoice; 3] = [Self::System, Self::Light, Self::Dark];
+}
+
 /// Time range for the "Clear browsing data" action. Only history is filtered by
 /// range; cookies and site data are always cleared in full (Servo's engine has no
 /// time-based cookie filter).
@@ -361,6 +397,9 @@ pub struct BrowserConfig {
     pub web_font_sans_serif: String,
     /// Default monospace font for web content; empty uses the engine default.
     pub web_font_monospace: String,
+    /// What `prefers-color-scheme` reports to pages that have no per-site
+    /// override of their own.
+    pub theme_preference: ThemeChoice,
     /// Default web-content font size in pixels.
     pub web_font_size: u16,
     /// Default web-content monospace font size in pixels.
@@ -390,6 +429,7 @@ impl Default for BrowserConfig {
             web_font_serif: String::new(),
             web_font_sans_serif: String::new(),
             web_font_monospace: String::new(),
+            theme_preference: ThemeChoice::default(),
             web_font_size: 16,
             web_font_monospace_size: 13,
             user_stylesheet_enabled: true,
