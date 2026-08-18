@@ -448,6 +448,9 @@ pub enum Message {
     /// Set the active tab's per-site cookie-protection override (URL-bar popover).
     /// `None` removes the override, restoring the global default.
     SetCookieProtectionOverride(Option<CookieProtectionLevel>),
+    /// Read pending gamepad input into the active tab (`gamepad` feature).
+    #[cfg(feature = "gamepad")]
+    PollGamepads,
     /// Answer the active tab's `beforeunload` prompt: `true` discards the page,
     /// `false` keeps it.
     UnloadRespond(bool),
@@ -625,6 +628,9 @@ pub struct App {
     mpris: Option<crate::mpris::MprisHandle>,
     /// Desktop notifications posted by pages; `None` if the thread could not start.
     notifications: Option<crate::notifications::NotificationHandle>,
+    /// Whether a gamepad is connected, which decides how often they are polled.
+    #[cfg(feature = "gamepad")]
+    gamepad_connected: bool,
     /// (active tab, its media generation) last published to MPRIS, so we only
     /// publish on an actual change or a tab switch.
     last_media: Option<(segmented_button::Entity, u64)>,
@@ -1928,6 +1934,8 @@ impl libcosmic::Application for App {
             servo_rx,
             mpris: crate::mpris::spawn(),
             notifications: crate::notifications::spawn(),
+            #[cfg(feature = "gamepad")]
+            gamepad_connected: false,
             last_media: None,
             pending_devtools: None,
             scale,
@@ -2054,6 +2062,20 @@ impl libcosmic::Application for App {
                 s.0.clone().map(Message::MediaAction)
             });
             subs.push(sub);
+        }
+
+        // Gamepads are polled, not pushed: nothing else wakes the app when a
+        // button is pressed, so a page would miss the input entirely between
+        // engine wakes. The rate drops to a slow watch for arrivals while no pad
+        // is connected, since that is the state most sessions stay in.
+        #[cfg(feature = "gamepad")]
+        {
+            let period = if self.gamepad_connected {
+                std::time::Duration::from_millis(16)
+            } else {
+                std::time::Duration::from_secs(1)
+            };
+            subs.push(libcosmic::iced::time::every(period).map(|_| Message::PollGamepads));
         }
 
         Subscription::batch(subs)
@@ -2933,6 +2955,14 @@ impl libcosmic::Application for App {
                 let stored = self.store_active_site_settings();
                 self.reload_active_tab();
                 return stored;
+            }
+            #[cfg(feature = "gamepad")]
+            Message::PollGamepads => {
+                // Only the tab the user is looking at receives the input, the
+                // same rule servoshell applies.
+                if let Some(tab) = self.tabs.active_data::<TabState>() {
+                    self.gamepad_connected = tab.servo.poll_gamepads();
+                }
             }
             Message::UnloadRespond(leave) => {
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>()
