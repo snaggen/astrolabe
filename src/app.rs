@@ -631,6 +631,10 @@ pub struct App {
     /// Whether a gamepad is connected, which decides how often they are polled.
     #[cfg(feature = "gamepad")]
     gamepad_connected: bool,
+    /// WebDriver server and the navigations clients are waiting on; `None`
+    /// unless `--webdriver-port` was given.
+    #[cfg(feature = "webdriver")]
+    webdriver: Option<crate::webdriver::WebDriver>,
     /// (active tab, its media generation) last published to MPRIS, so we only
     /// publish on an actual change or a tab switch.
     last_media: Option<(segmented_button::Entity, u64)>,
@@ -895,6 +899,256 @@ impl App {
         }
 
         Task::batch(tasks)
+    }
+
+    /// Answers one WebDriver command.
+    ///
+    /// Anything about windows or tabs is answered here, because the engine does
+    /// not know how this browser arranges them. Everything else — scripts,
+    /// elements, cookies — is forwarded into the engine, which owns the reply
+    /// channel the command carries.
+    #[cfg(feature = "webdriver")]
+    fn handle_webdriver_command(&mut self, command: cosmic_webview::WebDriverCommandMsg) {
+        use cosmic_webview::WebDriverCommandMsg as Msg;
+
+        // Every reply channel is a client blocking on an HTTP request, so a
+        // failed send is worth a line: it means a test is hanging.
+        fn reply(what: &str, result: Result<(), impl std::fmt::Debug>) {
+            if let Err(e) = result {
+                tracing::warn!("WebDriver {what} reply failed: {e:?}");
+            }
+        }
+
+        match command {
+            Msg::GetAllWebViews(sender) => {
+                let ids = self.webview_ids();
+                reply("GetAllWebViews", sender.send(ids));
+            }
+            Msg::GetFocusedWebView(sender) => {
+                let id = self
+                    .tabs
+                    .active_data::<TabState>()
+                    .map(|tab| tab.servo.webview_id());
+                reply("GetFocusedWebView", sender.send(id));
+            }
+            Msg::IsWebViewOpen(webview, sender) => {
+                let open = self.tab_for_webview(webview).is_some();
+                reply("IsWebViewOpen", sender.send(open));
+            }
+            Msg::FocusWebView(webview) => {
+                if let Some(id) = self.tab_for_webview(webview) {
+                    self.tabs.activate(id);
+                    self.sync_tab_visibility();
+                    self.sync_active_title();
+                }
+            }
+            Msg::CloseWebView(webview, sender) => {
+                if let Some(id) = self.tab_for_webview(webview) {
+                    if let Some(driver) = &mut self.webdriver {
+                        driver.forget(webview);
+                    }
+                    self.close_tab(id);
+                    self.sync_tab_visibility();
+                    self.sync_active_title();
+                }
+                reply("CloseWebView", sender.send(()));
+            }
+            Msg::NewWindow(_type_hint, id_sender, load_sender) => {
+                // Tab or window makes no difference here: this browser has one
+                // window, and the specification lets a tab stand in.
+                let blank = Url::parse("about:blank").expect("about:blank is always valid");
+                let id = self.add_tab(blank, false);
+                self.tabs.activate(id);
+                self.sync_tab_visibility();
+
+                let Some(webview) = self
+                    .tabs
+                    .data::<TabState>(id)
+                    .map(|tab| tab.servo.webview_id())
+                else {
+                    return;
+                };
+                let generation = self
+                    .tabs
+                    .data::<TabState>(id)
+                    .map_or(0, |tab| tab.servo.load_generation());
+                if let (Some(sender), Some(driver)) = (load_sender, self.webdriver.as_mut()) {
+                    driver.expect_load(webview, sender, generation);
+                }
+                reply("NewWindow", id_sender.send(webview));
+            }
+            Msg::LoadUrl(webview, url, sender) => {
+                self.webdriver_navigate(webview, sender, |tab| tab.servo.navigate(url));
+            }
+            Msg::Refresh(webview, sender) => {
+                self.webdriver_navigate(webview, sender, |tab| tab.servo.reload());
+            }
+            Msg::GoBack(webview, sender) => {
+                self.webdriver_navigate(webview, sender, |tab| tab.servo.go_back());
+            }
+            Msg::GoForward(webview, sender) => {
+                self.webdriver_navigate(webview, sender, |tab| tab.servo.go_forward());
+            }
+            Msg::InputEvent(webview, event, done) => {
+                if let Some(tab) = self
+                    .tab_for_webview(webview)
+                    .and_then(|id| self.tabs.data::<TabState>(id))
+                {
+                    tab.servo.send_input(event);
+                }
+                // The event is queued in the engine; the browser cannot tell when
+                // the page has seen it, so the acknowledgement is immediate.
+                if let Some(done) = done {
+                    reply("InputEvent", done.send(()));
+                }
+            }
+            Msg::TakeScreenshot(webview, _rect, sender) => {
+                let image = self
+                    .tab_for_webview(webview)
+                    .and_then(|id| self.tabs.data::<TabState>(id))
+                    .and_then(|tab| tab.servo.screenshot());
+                let result = image.ok_or(cosmic_webview::ScreenshotCaptureError::CouldNotReadImage);
+                reply("TakeScreenshot", sender.send(result));
+            }
+            Msg::GetWindowRect(_webview, sender) => {
+                reply("GetWindowRect", sender.send(self.webdriver_window_rect()));
+            }
+            Msg::GetViewportSize(_webview, sender) => {
+                let size = self.webdriver_window_rect().size();
+                let viewport =
+                    cosmic_webview::webdriver::viewport_size(size.width as f32, size.height as f32);
+                reply("GetViewportSize", sender.send(viewport));
+            }
+            Msg::SetWindowRect(_webview, _requested, sender) => {
+                // The window manager owns the geometry on Wayland; report what
+                // the window actually is rather than pretending to have moved it.
+                reply("SetWindowRect", sender.send(self.webdriver_window_rect()));
+            }
+            Msg::MaximizeWebView(_webview, sender) => {
+                reply("MaximizeWebView", sender.send(self.webdriver_window_rect()));
+            }
+            // Dialog questions are the embedder's: the engine has no idea what
+            // this browser is showing. Automation against a page that opens a
+            // dialog is not supported yet — answering "no prompt" keeps the
+            // client moving instead of dropping its reply channel, which the
+            // server reports as a lost window.
+            Msg::CurrentUserPrompt(_webview, sender) => {
+                reply("CurrentUserPrompt", sender.send(None));
+            }
+            Msg::GetAlertText(_webview, sender) => {
+                reply("GetAlertText", sender.send(Err(())));
+            }
+            Msg::HandleUserPrompt(_webview, _action, sender) => {
+                reply("HandleUserPrompt", sender.send(Err(())));
+            }
+            Msg::SendAlertText(_webview, _text) => {}
+            Msg::Shutdown => {
+                tracing::info!("WebDriver client asked the browser to quit");
+                self.webdriver = None;
+            }
+            // Scripts, cookies, element queries, dialogs: the engine answers
+            // these, and holds the reply channel the command carries.
+            other => {
+                if let Some(tab) = self.tabs.active_data::<TabState>() {
+                    tab.servo.execute_webdriver_command(other);
+                }
+            }
+        }
+    }
+
+    /// The engine ids of every open tab.
+    #[cfg(feature = "webdriver")]
+    fn webview_ids(&self) -> Vec<cosmic_webview::WebViewId> {
+        self.tabs
+            .iter()
+            .filter_map(|id| self.tabs.data::<TabState>(id))
+            .map(|tab| tab.servo.webview_id())
+            .collect()
+    }
+
+    /// The tab showing `webview`, if it is still open.
+    #[cfg(feature = "webdriver")]
+    fn tab_for_webview(
+        &self,
+        webview: cosmic_webview::WebViewId,
+    ) -> Option<segmented_button::Entity> {
+        self.tabs.iter().find(|&id| {
+            self.tabs
+                .data::<TabState>(id)
+                .is_some_and(|tab| tab.servo.webview_id() == webview)
+        })
+    }
+
+    /// The window rectangle WebDriver reports. Wayland never tells a client
+    /// where its window sits, so the origin is always zero.
+    #[cfg(feature = "webdriver")]
+    fn webdriver_window_rect(&self) -> cosmic_webview::DeviceIndependentIntRect {
+        let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
+        let width = (self.current_size.width as f32 / scale).round() as i32;
+        let height = (self.current_size.height as f32 / scale).round() as i32;
+        cosmic_webview::webdriver::window_rect(width, height)
+    }
+
+    /// Starts a navigation a WebDriver client is waiting on, holding its sender
+    /// until the tab finishes loading.
+    #[cfg(feature = "webdriver")]
+    fn webdriver_navigate(
+        &mut self,
+        webview: cosmic_webview::WebViewId,
+        sender: cosmic_webview::GenericSender<cosmic_webview::WebDriverLoadStatus>,
+        navigate: impl FnOnce(&TabState),
+    ) {
+        let Some(id) = self.tab_for_webview(webview) else {
+            let _ = sender.send(cosmic_webview::WebDriverLoadStatus::NavigationStop);
+            return;
+        };
+        let generation = self
+            .tabs
+            .data::<TabState>(id)
+            .map_or(0, |tab| tab.servo.load_generation());
+        if let Some(driver) = &mut self.webdriver {
+            driver.expect_load(webview, sender, generation);
+        }
+        if let Some(tab) = self.tabs.data::<TabState>(id) {
+            navigate(tab);
+        }
+    }
+
+    /// Answers finished navigations and runs pending WebDriver commands.
+    #[cfg(feature = "webdriver")]
+    fn pump_webdriver(&mut self) {
+        if self.webdriver.is_none() {
+            return;
+        }
+
+        // Report every tab's load state; the driver answers only the clients
+        // whose own navigation has since finished. Collected first because
+        // answering borrows the driver mutably.
+        let states: Vec<_> = self
+            .tabs
+            .iter()
+            .filter_map(|id| self.tabs.data::<TabState>(id))
+            .map(|tab| {
+                (
+                    tab.servo.webview_id(),
+                    tab.servo.load_generation(),
+                    tab.servo.load_status() == cosmic_webview::LoadStatus::Complete,
+                )
+            })
+            .collect();
+        if let Some(driver) = &mut self.webdriver {
+            for (webview, generation, complete) in states {
+                driver.notify_load_state(webview, generation, complete);
+            }
+        }
+
+        while let Some(command) = self
+            .webdriver
+            .as_ref()
+            .and_then(crate::webdriver::WebDriver::next_command)
+        {
+            self.handle_webdriver_command(command);
+        }
     }
 
     /// Dismiss the active context menu without selecting an item.
@@ -1936,6 +2190,9 @@ impl libcosmic::Application for App {
             notifications: crate::notifications::spawn(),
             #[cfg(feature = "gamepad")]
             gamepad_connected: false,
+            // Started below, once the engine the server borrows from is up.
+            #[cfg(feature = "webdriver")]
+            webdriver: None,
             last_media: None,
             pending_devtools: None,
             scale,
@@ -1969,6 +2226,15 @@ impl libcosmic::Application for App {
             info_dialog_message: None,
             devtools_port_str,
         };
+
+        // The first tab started the engine, whose waker and preferences the
+        // WebDriver server borrows, so it can only start from here.
+        #[cfg(feature = "webdriver")]
+        let mut app = app;
+        #[cfg(feature = "webdriver")]
+        if let Some(port) = flags.webdriver_port {
+            app.webdriver = crate::webdriver::WebDriver::start(port);
+        }
 
         let db_task = Task::perform(
             async { crate::db::open(crate::db::db_path()).await },
@@ -2310,6 +2576,13 @@ impl libcosmic::Application for App {
 
                 // Mirror the active tab's media state to the desktop (MPRIS).
                 self.publish_media();
+
+                // Answer any WebDriver client waiting for a tab to finish
+                // loading, then run the commands that arrived since the last
+                // wake. Both before the tab bookkeeping below, so a client sees
+                // the same state the browser does.
+                #[cfg(feature = "webdriver")]
+                self.pump_webdriver();
 
                 // Following a link can move the tab to another site, which has
                 // per-site overrides of its own.

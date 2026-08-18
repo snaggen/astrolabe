@@ -40,5 +40,9 @@ clap = { version = "4.6.6", features = ["derive"] }
 # surface that most browsing does not need.
 gamepad = ["cosmic-webview/gamepad"]
 
+# WebDriver automation. Starts a protocol server when --webdriver-port is given,
+# for driving the browser from a test client.
+webdriver = ["cosmic-webview/webdriver"]
+
 [dev-dependencies]
 pollster = "0.4"

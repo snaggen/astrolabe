@@ -34,6 +34,11 @@ pub struct Cli {
     /// whatever the setting says.
     #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
     pub devtools_port: Option<u16>,
+
+    /// Accept WebDriver automation on this port. Without it no server runs.
+    #[cfg(feature = "webdriver")]
+    #[arg(long, value_name = "PORT", value_parser = clap::value_parser!(u16).range(1..))]
+    pub webdriver_port: Option<u16>,
 }
 
 /// Normalize a command-line URL: anything with a scheme is taken as it is —

@@ -14,6 +14,8 @@ mod tabs;
 mod thumbnails;
 mod url_bar;
 mod user_content;
+#[cfg(feature = "webdriver")]
+mod webdriver;
 
 use clap::Parser as _;
 use cosmic_config::CosmicConfigEntry as _;
