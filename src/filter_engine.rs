@@ -66,15 +66,85 @@ fn build_engine(primary: &[&str], extra: &[&str]) -> Engine {
     let mut set = FilterSet::new(false);
     let opts = ParseOptions::default();
     for text in primary.iter().chain(extra) {
-        set.add_filter_list(text, opts);
+        set.add_filter_list((*text).to_owned(), opts);
     }
-    Engine::from_filter_set(set, true)
+    Engine::new_with_filter_set(set)
 }
 
 fn should_block(engine: &Engine, url: &str, resource_type: &str, source: &str) -> bool {
-    let Ok(req) = Request::new(url, source, resource_type) else {
+    // The HTTP method is unknown here — Servo's content-filter callback does not
+    // report it. An unparseable method leaves it unset, which makes filters
+    // carrying a `$method=` option never match while every other filter is
+    // unaffected. Guessing "GET" would instead mismatch XHR and form POSTs.
+    let Ok(req) = Request::new(url, source, resource_type, "") else {
         return false;
     };
-    let result = engine.check_network_request(&req);
-    result.matched && result.exception.is_none()
+    engine.check_network_request(&req).should_block()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tracker rule, an exception for one site, and a third-party-only rule.
+    const LIST: &str = "\
+||tracker.example^\n\
+@@||tracker.example^$domain=allowed.example\n\
+||cdn.example/pixel.gif^$third-party\n";
+
+    fn engine() -> Engine {
+        build_engine(&[LIST], &[])
+    }
+
+    #[test]
+    fn a_matching_rule_blocks() {
+        assert!(should_block(
+            &engine(),
+            "https://tracker.example/beacon.js",
+            "script",
+            "https://site.example/",
+        ));
+    }
+
+    #[test]
+    fn an_exception_overrides_the_block() {
+        assert!(!should_block(
+            &engine(),
+            "https://tracker.example/beacon.js",
+            "script",
+            "https://allowed.example/",
+        ));
+    }
+
+    #[test]
+    fn an_unlisted_host_is_allowed() {
+        assert!(!should_block(
+            &engine(),
+            "https://site.example/app.js",
+            "script",
+            "https://site.example/",
+        ));
+    }
+
+    #[test]
+    fn a_third_party_rule_ignores_same_origin_requests() {
+        let engine = engine();
+        assert!(should_block(
+            &engine,
+            "https://cdn.example/pixel.gif",
+            "image",
+            "https://site.example/",
+        ));
+        assert!(!should_block(
+            &engine,
+            "https://cdn.example/pixel.gif",
+            "image",
+            "https://cdn.example/",
+        ));
+    }
+
+    #[test]
+    fn a_malformed_url_is_not_blocked() {
+        assert!(!should_block(&engine(), "not a url", "script", ""));
+    }
 }
