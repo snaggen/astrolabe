@@ -35,6 +35,11 @@ use crate::tabs::{TabKind, TabState};
 use crate::url_bar::{self, SecurityStatus, UrlBarPopover};
 use cosmic_config::CosmicConfigEntry as _;
 
+/// Application ID, used for the cosmic-config store and the desktop entry.
+/// Declared at module level so [`load_config_and_start_engine`] can read the
+/// configuration before an [`App`] exists.
+pub const APP_ID: &str = "io.github.snaggen.CosmicWeb";
+
 /// Page-zoom step applied per Ctrl+± press, and the clamp bounds.
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.3;
@@ -2074,14 +2079,71 @@ impl Hash for MprisRx {
     }
 }
 
+// ── Start-up before the window exists ────────────────────────────────────────
+
+/// What [`App::init`] needs that was already decided before the window existed.
+pub struct Flags {
+    pub cli: crate::cli::Cli,
+    pub config: BrowserConfig,
+    pub config_handle: Option<cosmic_config::Config>,
+}
+
+/// Read the configuration, hand the engine its start-up settings, and start it.
+///
+/// Call this from `main` before `libcosmic::app::run`. Servo's start-up-only
+/// settings — the profile directory and the devtools server — have to be in
+/// place before [`cosmic_webview::start_engine`], and starting the engine here
+/// lets its constellation and script threads come up while libcosmic builds the
+/// window and its GPU context.
+pub fn load_config_and_start_engine(cli: crate::cli::Cli) -> Flags {
+    let config_handle = cosmic_config::Config::new(APP_ID, BrowserConfig::VERSION).ok();
+    let config = config_handle
+        .as_ref()
+        .map(|c| {
+            BrowserConfig::get_entry(c).unwrap_or_else(|(errs, c)| {
+                for e in errs {
+                    tracing::warn!("Config load error: {e}");
+                }
+                c
+            })
+        })
+        .unwrap_or_default();
+
+    cosmic_webview::set_profile_dir(crate::db::profile_dir());
+    // Apply the camera/microphone opt-in before the engine starts so it is in
+    // effect from the first page load.
+    cosmic_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
+    // Apply web-content fonts before the engine starts.
+    cosmic_webview::set_web_fonts(config.web_fonts());
+    // Enable the remote devtools server if configured. `--devtools-port` turns
+    // it on for this session whatever the setting says, without changing the
+    // stored configuration.
+    if let Some(port) = cli.devtools_port {
+        cosmic_webview::set_devtools_enabled(port);
+    } else if config.devtools_enabled {
+        cosmic_webview::set_devtools_enabled(config.devtools_port);
+    }
+    // Apply user scripts / stylesheet before the engine starts so the first
+    // page load already has them.
+    cosmic_webview::set_user_content(crate::user_content::load(&config));
+
+    cosmic_webview::start_engine();
+
+    Flags {
+        cli,
+        config,
+        config_handle,
+    }
+}
+
 // ── Application trait implementation ─────────────────────────────────────────
 
 impl libcosmic::Application for App {
     type Executor = executor::Default;
-    type Flags = crate::cli::Cli;
+    type Flags = Flags;
     type Message = Message;
 
-    const APP_ID: &'static str = "io.github.snaggen.CosmicWeb";
+    const APP_ID: &'static str = APP_ID;
 
     fn core(&self) -> &Core {
         &self.core
@@ -2091,42 +2153,20 @@ impl libcosmic::Application for App {
         &mut self.core
     }
 
-    fn init(core: Core, flags: crate::cli::Cli) -> (Self, Task<Message>) {
+    fn init(core: Core, flags: Flags) -> (Self, Task<Message>) {
+        // The configuration was read and the engine started in
+        // `load_config_and_start_engine`, before the window existed.
+        let Flags {
+            cli,
+            config,
+            config_handle,
+        } = flags;
+
         let scale = std::env::var("COSMIC_SCALE")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
             .unwrap_or(1.0);
 
-        let config_handle = cosmic_config::Config::new(Self::APP_ID, BrowserConfig::VERSION).ok();
-        let config = config_handle
-            .as_ref()
-            .map(|c| {
-                BrowserConfig::get_entry(c).unwrap_or_else(|(errs, c)| {
-                    for e in errs {
-                        tracing::warn!("Config load error: {e}");
-                    }
-                    c
-                })
-            })
-            .unwrap_or_default();
-
-        cosmic_webview::set_profile_dir(crate::db::profile_dir());
-        // Apply the camera/microphone opt-in before the engine starts so it is in
-        // effect from the first page load.
-        cosmic_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
-        // Apply web-content fonts before the engine starts.
-        cosmic_webview::set_web_fonts(config.web_fonts());
-        // Enable the remote devtools server if configured (must be before first
-        // tab). `--devtools-port` turns it on for this session whatever the
-        // setting says, without changing the stored configuration.
-        if let Some(port) = flags.devtools_port {
-            cosmic_webview::set_devtools_enabled(port);
-        } else if config.devtools_enabled {
-            cosmic_webview::set_devtools_enabled(config.devtools_port);
-        }
-        // Apply user scripts / stylesheet before the engine starts so the first
-        // page load already has them.
-        cosmic_webview::set_user_content(crate::user_content::load(&config));
         let user_scripts = crate::user_content::list_scripts(&config);
 
         let initial_size = PhysicalSize::new(1280u32, 800);
@@ -2143,7 +2183,7 @@ impl libcosmic::Application for App {
         });
 
         // A command-line URL overrides the configured startup page.
-        let (initial_url, show_new_tab_page) = match flags.url {
+        let (initial_url, show_new_tab_page) = match cli.url {
             Some(url) => (url, false),
             None => resolve_page(&config.startup_page),
         };
@@ -2232,7 +2272,7 @@ impl libcosmic::Application for App {
         #[cfg(feature = "webdriver")]
         let mut app = app;
         #[cfg(feature = "webdriver")]
-        if let Some(port) = flags.webdriver_port {
+        if let Some(port) = cli.webdriver_port {
             app.webdriver = crate::webdriver::WebDriver::start(port);
         }
 
@@ -2311,14 +2351,12 @@ impl libcosmic::Application for App {
             _ => None,
         });
 
-        let config_sub = self
-            .watch_config::<BrowserConfig>(Self::APP_ID)
-            .map(|update| {
-                if !update.errors.is_empty() {
-                    tracing::warn!("Config load errors: {:?}", update.errors);
-                }
-                Message::ConfigChanged(update.config)
-            });
+        let config_sub = self.watch_config::<BrowserConfig>(APP_ID).map(|update| {
+            if !update.errors.is_empty() {
+                tracing::warn!("Config load errors: {:?}", update.errors);
+            }
+            Message::ConfigChanged(update.config)
+        });
 
         // Forward MPRIS media actions (from the applet or hardware keys) into the
         // app so the active tab's engine receives them.

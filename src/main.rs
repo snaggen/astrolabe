@@ -46,10 +46,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let font: libcosmic::iced::Font = tk.interface_font.into();
 
+    // Read the browser configuration and start the web engine before the window
+    // exists, so Servo comes up while libcosmic builds the window and its GPU
+    // context. Anything Servo only reads at start-up is applied inside it.
+    let flags = app::load_config_and_start_engine(options);
+
     let settings = Settings::default()
         .size((1280.0, 800.0).into())
         .default_font(font);
 
-    libcosmic::app::run::<app::App>(settings, options)?;
+    libcosmic::app::run::<app::App>(settings, flags)?;
     Ok(())
 }
