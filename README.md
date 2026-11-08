@@ -1,4 +1,8 @@
-# Astrolabe
+<p align="center">
+  <img src="res/icons/hicolor/scalable/apps/io.github.snaggen.Astrolabe.svg" width="128" height="128" alt="Astrolabe logo">
+</p>
+
+<h1 align="center">Astrolabe</h1>
 
 A web browser for the [COSMIC Desktop Environment](https://github.com/pop-os/cosmic-epoch), built
 on the [Servo](https://servo.org/) web engine. Servo is the engine; Astrolabe is the instrument
