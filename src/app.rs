@@ -481,6 +481,8 @@ pub enum Message {
     ClearSiteData(String),
     /// Filter the list of sites with stored data by this text.
     SetSiteDataFilter(String),
+    /// Close a toast on the settings page (timed out or dismissed).
+    CloseToast(widget::ToastId),
     /// Answer the active tab's pending permission request (prompt banner).
     PermissionRespond(PermissionResponse),
     /// Clear a permission decision for the active site (permissions popover).
@@ -725,6 +727,8 @@ pub struct App {
     site_data_domains: Vec<String>,
     /// Text the list of sites with stored data is filtered by.
     site_data_filter: String,
+    /// Short confirmations shown on the settings page, such as data cleared.
+    toasts: widget::Toasts<Message>,
     /// True while the "Clear browsing data" confirmation dialog is shown.
     clear_confirm_open: bool,
     // ── Permissions ────────────────────────────────────────────────────────────
@@ -1427,12 +1431,16 @@ impl App {
             astrolabe_webview::clear_site_data(&domains);
             self.refresh_site_data_domains();
         }
+        let toast = self
+            .toasts
+            .push(widget::Toast::new("Browsing data cleared"))
+            .map(libcosmic::action::app);
 
         if !self.clear_history_checked {
-            return Task::none();
+            return toast;
         }
         let Some(conn) = self.db.clone() else {
-            return Task::none();
+            return toast;
         };
         let within = self.clear_range.within_seconds();
         let clear = Task::perform(
@@ -1443,17 +1451,22 @@ impl App {
             },
             |_| libcosmic::action::app(Message::VisitLogged),
         );
-        clear
+        let clear = clear
             .chain(self.reload_history())
-            .chain(self.reload_new_tab())
+            .chain(self.reload_new_tab());
+        Task::batch([toast, clear])
     }
 
     /// Clear cookies, web storage, and history for a single site.
     fn clear_site(&mut self, domain: String) -> Task<Message> {
         astrolabe_webview::clear_site_data(&[domain.as_str()]);
         self.refresh_site_data_domains();
+        let toast = self
+            .toasts
+            .push(widget::Toast::new(format!("Cleared data for {domain}")))
+            .map(libcosmic::action::app);
         let Some(conn) = self.db.clone() else {
-            return Task::none();
+            return toast;
         };
         let clear = Task::perform(
             async move {
@@ -1463,9 +1476,10 @@ impl App {
             },
             |_| libcosmic::action::app(Message::VisitLogged),
         );
-        clear
+        let clear = clear
             .chain(self.reload_history())
-            .chain(self.reload_new_tab())
+            .chain(self.reload_new_tab());
+        Task::batch([toast, clear])
     }
 
     /// Answer a permission request for tab `id`: auto-allow/deny from a stored
@@ -2270,6 +2284,7 @@ impl libcosmic::Application for App {
             clear_cookies_checked: true,
             site_data_domains: Vec::new(),
             site_data_filter: String::new(),
+            toasts: widget::Toasts::new(Message::CloseToast),
             clear_confirm_open: false,
             site_permissions: HashMap::new(),
             site_settings: HashMap::new(),
@@ -3329,6 +3344,7 @@ impl libcosmic::Application for App {
             }
             Message::ClearSiteData(domain) => return self.clear_site(domain),
             Message::SetSiteDataFilter(filter) => self.site_data_filter = filter,
+            Message::CloseToast(id) => self.toasts.remove(id),
 
             Message::PermissionRespond(response) => {
                 // Answer the engine, then record the choice (capture domain +
@@ -4060,7 +4076,7 @@ impl libcosmic::Application for App {
         // A settings tab renders the settings page full-window, without the
         // address bar (it has no web page to navigate).
         if tab.kind == TabKind::Settings {
-            return widget::container(pages::settings::view(
+            let page = widget::container(pages::settings::view(
                 &self.settings_nav,
                 &self.config,
                 &self.custom_filter_list_url,
@@ -4079,8 +4095,8 @@ impl libcosmic::Application for App {
                 &self.devtools_port_str,
                 &self.user_scripts,
             ))
-            .height(Length::Fill)
-            .into();
+            .height(Length::Fill);
+            return widget::toaster(&self.toasts, page);
         }
 
         let (can_back, can_forward, is_loading) = (
