@@ -39,7 +39,7 @@ binary that runs on Linux with X11 or Wayland.
 - Remote developer tools via Servo's Firefox Remote Debugging Protocol (optional)
 - Persistent cookies and session data across restarts
 - HTML5 media playback via GStreamer
-- Kinetic (momentum) scrolling
+- Kinetic (momentum) scrolling on touchpads
 - HiDPI support
 
 ## Build and run
