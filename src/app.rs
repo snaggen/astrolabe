@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use crate::mpris::{MediaUpdate, PlaybackStatus};
-use cosmic_webview::{
+use astrolabe_webview::{
     ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EditingActionEvent,
     EmbedderControl, FIND_BAR_ID, FindBar, FindBarMsg, FindBarState, FindResult, InputEvent,
     MediaSessionActionType, MediaSessionPlaybackState, PermissionFeature, WebViewWidget,
@@ -38,7 +38,7 @@ use cosmic_config::CosmicConfigEntry as _;
 /// Application ID, used for the cosmic-config store and the desktop entry.
 /// Declared at module level so [`load_config_and_start_engine`] can read the
 /// configuration before an [`App`] exists.
-pub const APP_ID: &str = "io.github.snaggen.CosmicWeb";
+pub const APP_ID: &str = "io.github.snaggen.Astrolabe";
 
 /// Page-zoom step applied per Ctrl+± press, and the clamp bounds.
 const ZOOM_STEP: f32 = 0.1;
@@ -52,7 +52,7 @@ const NEW_TAB_TOP_SITES: usize = 48;
 /// has one. Features without a dedicated default always fall back to "ask".
 ///
 /// Feature comparison, stable keys, and labels live in
-/// [`cosmic_webview::permission`] so every embedder shares them.
+/// [`astrolabe_webview::permission`] so every embedder shares them.
 fn permission_kind(feature: PermissionFeature) -> Option<crate::config::PermissionKind> {
     use crate::config::PermissionKind;
     match feature {
@@ -68,7 +68,7 @@ fn permission_kind(feature: PermissionFeature) -> Option<crate::config::Permissi
 /// Build the Bluetooth device-selection dialog listing `devices`. Picking a row
 /// emits [`Message::BluetoothPick`]; cancelling emits [`Message::BluetoothCancel`].
 fn bluetooth_dialog(
-    devices: &[cosmic_webview::BluetoothDeviceDescription],
+    devices: &[astrolabe_webview::BluetoothDeviceDescription],
 ) -> Element<'_, Message> {
     let spacing = libcosmic::theme::spacing();
     let mut dialog = widget::dialog()
@@ -289,11 +289,11 @@ fn resolve_page(page: &StartupPage) -> (Url, bool) {
 }
 
 /// Map a dark-mode flag to the Servo theme that drives `prefers-color-scheme`.
-fn servo_theme_from(is_dark: bool) -> cosmic_webview::Theme {
+fn servo_theme_from(is_dark: bool) -> astrolabe_webview::Theme {
     if is_dark {
-        cosmic_webview::Theme::Dark
+        astrolabe_webview::Theme::Dark
     } else {
-        cosmic_webview::Theme::Light
+        astrolabe_webview::Theme::Light
     }
 }
 
@@ -645,7 +645,7 @@ pub struct App {
     last_media: Option<(segmented_button::Entity, u64)>,
     /// A pending remote-devtools connection awaiting the user's allow/deny.
     /// Engine-level (one devtools server per process), so not per-tab.
-    pending_devtools: Option<cosmic_webview::DevtoolsRequest>,
+    pending_devtools: Option<astrolabe_webview::DevtoolsRequest>,
     /// HiDPI scale for converting logical cursor coordinates to physical pixels.
     scale: f32,
     /// Physical size of the webview area, updated on each resize.
@@ -913,8 +913,8 @@ impl App {
     /// elements, cookies — is forwarded into the engine, which owns the reply
     /// channel the command carries.
     #[cfg(feature = "webdriver")]
-    fn handle_webdriver_command(&mut self, command: cosmic_webview::WebDriverCommandMsg) {
-        use cosmic_webview::WebDriverCommandMsg as Msg;
+    fn handle_webdriver_command(&mut self, command: astrolabe_webview::WebDriverCommandMsg) {
+        use astrolabe_webview::WebDriverCommandMsg as Msg;
 
         // Every reply channel is a client blocking on an HTTP request, so a
         // failed send is worth a line: it means a test is hanging.
@@ -1012,7 +1012,8 @@ impl App {
                     .tab_for_webview(webview)
                     .and_then(|id| self.tabs.data::<TabState>(id))
                     .and_then(|tab| tab.servo.screenshot());
-                let result = image.ok_or(cosmic_webview::ScreenshotCaptureError::CouldNotReadImage);
+                let result =
+                    image.ok_or(astrolabe_webview::ScreenshotCaptureError::CouldNotReadImage);
                 reply("TakeScreenshot", sender.send(result));
             }
             Msg::GetWindowRect(_webview, sender) => {
@@ -1020,8 +1021,10 @@ impl App {
             }
             Msg::GetViewportSize(_webview, sender) => {
                 let size = self.webdriver_window_rect().size();
-                let viewport =
-                    cosmic_webview::webdriver::viewport_size(size.width as f32, size.height as f32);
+                let viewport = astrolabe_webview::webdriver::viewport_size(
+                    size.width as f32,
+                    size.height as f32,
+                );
                 reply("GetViewportSize", sender.send(viewport));
             }
             Msg::SetWindowRect(_webview, _requested, sender) => {
@@ -1063,7 +1066,7 @@ impl App {
 
     /// The engine ids of every open tab.
     #[cfg(feature = "webdriver")]
-    fn webview_ids(&self) -> Vec<cosmic_webview::WebViewId> {
+    fn webview_ids(&self) -> Vec<astrolabe_webview::WebViewId> {
         self.tabs
             .iter()
             .filter_map(|id| self.tabs.data::<TabState>(id))
@@ -1075,7 +1078,7 @@ impl App {
     #[cfg(feature = "webdriver")]
     fn tab_for_webview(
         &self,
-        webview: cosmic_webview::WebViewId,
+        webview: astrolabe_webview::WebViewId,
     ) -> Option<segmented_button::Entity> {
         self.tabs.iter().find(|&id| {
             self.tabs
@@ -1087,11 +1090,11 @@ impl App {
     /// The window rectangle WebDriver reports. Wayland never tells a client
     /// where its window sits, so the origin is always zero.
     #[cfg(feature = "webdriver")]
-    fn webdriver_window_rect(&self) -> cosmic_webview::DeviceIndependentIntRect {
+    fn webdriver_window_rect(&self) -> astrolabe_webview::DeviceIndependentIntRect {
         let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
         let width = (self.current_size.width as f32 / scale).round() as i32;
         let height = (self.current_size.height as f32 / scale).round() as i32;
-        cosmic_webview::webdriver::window_rect(width, height)
+        astrolabe_webview::webdriver::window_rect(width, height)
     }
 
     /// Starts a navigation a WebDriver client is waiting on, holding its sender
@@ -1099,12 +1102,12 @@ impl App {
     #[cfg(feature = "webdriver")]
     fn webdriver_navigate(
         &mut self,
-        webview: cosmic_webview::WebViewId,
-        sender: cosmic_webview::GenericSender<cosmic_webview::WebDriverLoadStatus>,
+        webview: astrolabe_webview::WebViewId,
+        sender: astrolabe_webview::GenericSender<astrolabe_webview::WebDriverLoadStatus>,
         navigate: impl FnOnce(&TabState),
     ) {
         let Some(id) = self.tab_for_webview(webview) else {
-            let _ = sender.send(cosmic_webview::WebDriverLoadStatus::NavigationStop);
+            let _ = sender.send(astrolabe_webview::WebDriverLoadStatus::NavigationStop);
             return;
         };
         let generation = self
@@ -1137,7 +1140,7 @@ impl App {
                 (
                     tab.servo.webview_id(),
                     tab.servo.load_generation(),
-                    tab.servo.load_status() == cosmic_webview::LoadStatus::Complete,
+                    tab.servo.load_status() == astrolabe_webview::LoadStatus::Complete,
                 )
             })
             .collect();
@@ -1309,7 +1312,7 @@ impl App {
     /// Keyboard shortcuts and the address-bar control are the only ways in:
     /// touchpad pinch never arrives, because iced has no gesture event to carry
     /// what the compositor and winit already deliver (pop-os/libcosmic#1315,
-    /// iced-rs/iced#3377). See `WebViewWidget` in cosmic-webview.
+    /// iced-rs/iced#3377). See `WebViewWidget` in astrolabe-webview.
     fn adjust_zoom(&mut self, delta: f32) {
         if let Some(tab) = self.tabs.active_data::<TabState>() {
             let target = (tab.servo.page_zoom() + delta).clamp(ZOOM_MIN, ZOOM_MAX);
@@ -1358,7 +1361,7 @@ impl App {
         let window = logical_to_physical(window_size, self.scale);
         // Without a known monitor the window is the closest thing to a screen.
         let screen = monitor.map_or(window, |size| logical_to_physical(size, self.scale));
-        cosmic_webview::set_screen_geometry(cosmic_webview::ScreenGeometry {
+        astrolabe_webview::set_screen_geometry(astrolabe_webview::ScreenGeometry {
             screen_size: screen,
             // Neither winit nor Wayland reports the work area, so panels and
             // docks are not subtracted: availWidth/availHeight are the full size.
@@ -1397,7 +1400,7 @@ impl App {
     /// Refresh the list of domains that hold cookies or web storage, shown for
     /// per-site clearing in the settings drawer.
     fn refresh_site_data_domains(&mut self) {
-        let mut domains: Vec<String> = cosmic_webview::list_site_data()
+        let mut domains: Vec<String> = astrolabe_webview::list_site_data()
             .iter()
             .map(|site| site.name())
             .collect();
@@ -1412,9 +1415,9 @@ impl App {
     /// cleared in full; only history honours [`App::clear_range`].
     fn clear_browsing_data(&mut self) -> Task<Message> {
         if self.clear_cookies_checked {
-            cosmic_webview::clear_all_cookies();
+            astrolabe_webview::clear_all_cookies();
             let domains: Vec<&str> = self.site_data_domains.iter().map(String::as_str).collect();
-            cosmic_webview::clear_site_data(&domains);
+            astrolabe_webview::clear_site_data(&domains);
             self.refresh_site_data_domains();
         }
 
@@ -1440,7 +1443,7 @@ impl App {
 
     /// Clear cookies, web storage, and history for a single site.
     fn clear_site(&mut self, domain: String) -> Task<Message> {
-        cosmic_webview::clear_site_data(&[domain.as_str()]);
+        astrolabe_webview::clear_site_data(&[domain.as_str()]);
         self.refresh_site_data_domains();
         let Some(conn) = self.db.clone() else {
             return Task::none();
@@ -1463,7 +1466,7 @@ impl App {
     fn resolve_permission(
         &mut self,
         id: segmented_button::Entity,
-        request: cosmic_webview::PermissionRequest,
+        request: astrolabe_webview::PermissionRequest,
         domain: Option<String>,
     ) -> Option<Task<Message>> {
         let feature = request.feature();
@@ -1662,7 +1665,7 @@ impl App {
     /// current page has finished loading. No-op until the page is complete, for
     /// non-HTTP(S) URLs, or when this URL was already captured.
     fn maybe_capture_active_thumbnail(&mut self) -> Task<Message> {
-        use cosmic_webview::LoadStatus;
+        use astrolabe_webview::LoadStatus;
 
         let Some(tab) = self.tabs.active_data_mut::<TabState>() else {
             return Task::none();
@@ -1778,13 +1781,13 @@ impl App {
 
     /// Push the current web-font settings into the engine (next page load).
     fn apply_web_fonts(&self) {
-        cosmic_webview::set_web_fonts(self.config.web_fonts());
+        astrolabe_webview::set_web_fonts(self.config.web_fonts());
     }
 
     /// Push the current user scripts and stylesheet into the engine. Applies on
     /// the next page load, so reload open tabs to see the change immediately.
     fn apply_user_content(&self) {
-        cosmic_webview::set_user_content(crate::user_content::load(&self.config));
+        astrolabe_webview::set_user_content(crate::user_content::load(&self.config));
     }
 
     /// Re-scan the userscripts directory into `self.user_scripts`.
@@ -1959,7 +1962,7 @@ impl App {
         Task::perform(
             async move {
                 let cache_dir = crate::filter_lists::cache_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/cosmic-web-filters"));
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp/astrolabe-filters"));
                 let mut standard_texts = Vec::new();
                 let mut strict_extra_texts = Vec::new();
                 let mut custom_texts = Vec::new();
@@ -2092,7 +2095,7 @@ pub struct Flags {
 ///
 /// Call this from `main` before `libcosmic::app::run`. Servo's start-up-only
 /// settings — the profile directory and the devtools server — have to be in
-/// place before [`cosmic_webview::start_engine`], and starting the engine here
+/// place before [`astrolabe_webview::start_engine`], and starting the engine here
 /// lets its constellation and script threads come up while libcosmic builds the
 /// window and its GPU context.
 pub fn load_config_and_start_engine(cli: crate::cli::Cli) -> Flags {
@@ -2109,25 +2112,25 @@ pub fn load_config_and_start_engine(cli: crate::cli::Cli) -> Flags {
         })
         .unwrap_or_default();
 
-    cosmic_webview::set_profile_dir(crate::db::profile_dir());
+    astrolabe_webview::set_profile_dir(crate::db::profile_dir());
     // Apply the camera/microphone opt-in before the engine starts so it is in
     // effect from the first page load.
-    cosmic_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
+    astrolabe_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
     // Apply web-content fonts before the engine starts.
-    cosmic_webview::set_web_fonts(config.web_fonts());
+    astrolabe_webview::set_web_fonts(config.web_fonts());
     // Enable the remote devtools server if configured. `--devtools-port` turns
     // it on for this session whatever the setting says, without changing the
     // stored configuration.
     if let Some(port) = cli.devtools_port {
-        cosmic_webview::set_devtools_enabled(port);
+        astrolabe_webview::set_devtools_enabled(port);
     } else if config.devtools_enabled {
-        cosmic_webview::set_devtools_enabled(config.devtools_port);
+        astrolabe_webview::set_devtools_enabled(config.devtools_port);
     }
     // Apply user scripts / stylesheet before the engine starts so the first
     // page load already has them.
-    cosmic_webview::set_user_content(crate::user_content::load(&config));
+    astrolabe_webview::set_user_content(crate::user_content::load(&config));
 
-    cosmic_webview::start_engine();
+    astrolabe_webview::start_engine();
 
     Flags {
         cli,
@@ -2175,7 +2178,7 @@ impl libcosmic::Application for App {
         // 0×0 screen — a page reading `screen.width` at document-start on the
         // first load would divide by zero. The real values replace these as
         // soon as the query returns.
-        cosmic_webview::set_screen_geometry(cosmic_webview::ScreenGeometry {
+        astrolabe_webview::set_screen_geometry(astrolabe_webview::ScreenGeometry {
             screen_size: initial_size,
             available_size: initial_size,
             window_position: PhysicalPosition::new(0, 0),
@@ -2293,7 +2296,7 @@ impl libcosmic::Application for App {
         // the shared engine. The final drop triggers ServoInner::Drop which
         // flushes cookie_jar.json to disk.
         self.tabs = segmented_button::SingleSelectModel::default();
-        cosmic_webview::shutdown_engine();
+        astrolabe_webview::shutdown_engine();
         None
     }
 
@@ -2419,14 +2422,14 @@ impl libcosmic::Application for App {
 
                 // A remote-devtools client may be requesting a connection. This is
                 // engine-level (one server per process), so poll it once per wake.
-                if let Some(request) = cosmic_webview::take_devtools_request() {
+                if let Some(request) = astrolabe_webview::take_devtools_request() {
                     self.pending_devtools = Some(request);
                 }
 
                 // WebViews the engine opened for us (window.open, target=_blank),
                 // collected across all tabs and adopted after the loop so we don't
                 // mutate the tab model while iterating it.
-                let mut adopted: Vec<cosmic_webview::ServoState> = Vec::new();
+                let mut adopted: Vec<astrolabe_webview::ServoState> = Vec::new();
 
                 // Set when an engine favicon was cached this wake, to refresh tiles.
                 let mut favicon_saved = false;
@@ -2436,7 +2439,7 @@ impl libcosmic::Application for App {
                 let mut closed_ids: Vec<segmented_button::Entity> = Vec::new();
 
                 // Notifications posted by any tab this wake, shown after the loop.
-                let mut notifications: Vec<cosmic_webview::Notification> = Vec::new();
+                let mut notifications: Vec<astrolabe_webview::Notification> = Vec::new();
 
                 // Process state changes for every tab.
                 let ids: Vec<_> = self.tabs.iter().collect();
@@ -2511,7 +2514,7 @@ impl libcosmic::Application for App {
 
                         // No frame copying here: the engine fills the shared
                         // frame buffer directly and the widget uploads it on
-                        // the next draw. See cosmic-webview's FrameSink.
+                        // the next draw. See astrolabe-webview's FrameSink.
 
                         let crash = tab.servo.take_crash();
                         (title, dialog, crash, permission, favicon, favicon_url)
@@ -2633,7 +2636,7 @@ impl libcosmic::Application for App {
                 // about: pages and partially-loaded pages out of history. Only
                 // fires when the URL changes so repeated wakes don't spam the DB.
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>()
-                    && tab.servo.load_status() == cosmic_webview::LoadStatus::Complete
+                    && tab.servo.load_status() == astrolabe_webview::LoadStatus::Complete
                     && let Some(url) = tab.servo.current_url()
                     && is_loggable_url(&url)
                 {
@@ -3385,7 +3388,7 @@ impl libcosmic::Application for App {
             Message::SetAllowCameraMicrophone(on) => {
                 self.write_config(|c, h| c.set_allow_camera_microphone(h, on));
                 // Update the running engine; takes effect on the next page load.
-                cosmic_webview::set_camera_microphone_enabled(on);
+                astrolabe_webview::set_camera_microphone_enabled(on);
             }
             Message::SetWebFontSerif(family) => {
                 self.write_config(|c, h| c.set_web_font_serif(h, family));
@@ -4021,7 +4024,7 @@ impl libcosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        use cosmic_webview::LoadStatus;
+        use astrolabe_webview::LoadStatus;
 
         let Some(tab) = self.tabs.active_data::<TabState>() else {
             return widget::text("No active tab").into();

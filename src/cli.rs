@@ -11,7 +11,7 @@ use url::Url;
 /// Options parsed from the command line.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 #[command(
-    name = "cosmic-web",
+    name = "astrolabe",
     version,
     about = "A web browser for the COSMIC desktop"
 )]
@@ -82,12 +82,12 @@ mod tests {
     /// Parse an argument list the way `Cli::parse` reads `std::env::args`,
     /// program name included.
     fn options(args: &[&str]) -> Cli {
-        let argv = std::iter::once("cosmic-web").chain(args.iter().copied());
+        let argv = std::iter::once("astrolabe").chain(args.iter().copied());
         Cli::try_parse_from(argv).expect("arguments should parse")
     }
 
     fn error(args: &[&str]) -> String {
-        let argv = std::iter::once("cosmic-web").chain(args.iter().copied());
+        let argv = std::iter::once("astrolabe").chain(args.iter().copied());
         Cli::try_parse_from(argv)
             .expect_err("arguments should be rejected")
             .to_string()

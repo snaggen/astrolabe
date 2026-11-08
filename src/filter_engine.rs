@@ -1,14 +1,14 @@
 //! Adblock filter engine wrapping Brave's `adblock` crate.
 //!
 //! Builds one [`adblock::Engine`] per protection level and exposes a
-//! [`ContentFilterFn`] suitable for [`cosmic_webview::ServoState::set_content_filter`].
+//! [`ContentFilterFn`] suitable for [`astrolabe_webview::ServoState::set_content_filter`].
 
 use std::sync::Arc;
 
 use adblock::Engine;
 use adblock::lists::{FilterSet, ParseOptions};
 use adblock::request::Request;
-use cosmic_webview::ContentFilterFn;
+use astrolabe_webview::ContentFilterFn;
 use url::Url;
 
 use crate::config::CookieProtectionLevel;

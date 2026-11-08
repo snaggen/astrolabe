@@ -1,8 +1,8 @@
 //! User scripts and user stylesheet stored as files under the XDG config dir.
 //!
 //! Layout:
-//! - `<config>/cosmic-web/userscripts/*.js` — one user script per file.
-//! - `<config>/cosmic-web/user.css` — the user stylesheet.
+//! - `<config>/astrolabe/userscripts/*.js` — one user script per file.
+//! - `<config>/astrolabe/user.css` — the user stylesheet.
 //!
 //! Enable/disable state lives in [`BrowserConfig`] (`disabled_userscripts`,
 //! `user_stylesheet_enabled`); the files themselves are edited externally. The
@@ -17,11 +17,11 @@ use crate::config::BrowserConfig;
 /// Script directory chosen with `--userscripts`, if any.
 static SCRIPTS_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// The `cosmic-web` config directory (created lazily by callers that write).
+/// The `astrolabe` config directory (created lazily by callers that write).
 fn base_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("cosmic-web")
+        .join("astrolabe")
 }
 
 /// Read user scripts from `dir` instead of from the config directory.
@@ -79,8 +79,8 @@ pub fn list_scripts(config: &BrowserConfig) -> Vec<ScriptEntry> {
 }
 
 /// Reads the enabled user scripts and (if enabled) the user stylesheet into a
-/// [`cosmic_webview::UserContent`] ready for `set_user_content`.
-pub fn load(config: &BrowserConfig) -> cosmic_webview::UserContent {
+/// [`astrolabe_webview::UserContent`] ready for `set_user_content`.
+pub fn load(config: &BrowserConfig) -> astrolabe_webview::UserContent {
     let scripts = list_scripts(config)
         .into_iter()
         .filter(|s| s.enabled)
@@ -88,7 +88,7 @@ pub fn load(config: &BrowserConfig) -> cosmic_webview::UserContent {
             let path = scripts_dir().join(&s.name);
             std::fs::read_to_string(&path)
                 .ok()
-                .map(|source| cosmic_webview::UserContentItem {
+                .map(|source| astrolabe_webview::UserContentItem {
                     source,
                     path: Some(path),
                 })
@@ -101,7 +101,7 @@ pub fn load(config: &BrowserConfig) -> cosmic_webview::UserContent {
             .ok()
             .filter(|css| !css.trim().is_empty())
             .map(|source| {
-                vec![cosmic_webview::UserContentItem {
+                vec![astrolabe_webview::UserContentItem {
                     source,
                     path: Some(path),
                 }]
@@ -111,7 +111,7 @@ pub fn load(config: &BrowserConfig) -> cosmic_webview::UserContent {
         Vec::new()
     };
 
-    cosmic_webview::UserContent {
+    astrolabe_webview::UserContent {
         scripts,
         stylesheets,
     }
@@ -146,7 +146,7 @@ pub fn open_stylesheet() {
         return;
     }
     if !path.exists()
-        && let Err(e) = std::fs::write(&path, "/* cosmic-web user stylesheet */\n")
+        && let Err(e) = std::fs::write(&path, "/* astrolabe user stylesheet */\n")
     {
         tracing::warn!("Failed to create user.css: {e}");
         return;

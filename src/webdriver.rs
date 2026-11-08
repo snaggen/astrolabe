@@ -15,11 +15,11 @@
 
 use std::collections::HashMap;
 
-use cosmic_webview::{GenericSender, WebDriverCommandMsg, WebDriverLoadStatus, WebViewId};
+use astrolabe_webview::{GenericSender, WebDriverCommandMsg, WebDriverLoadStatus, WebViewId};
 
 /// The WebDriver server and the navigations it is waiting on.
 pub struct WebDriver {
-    commands: cosmic_webview::webdriver::WebDriverCommands,
+    commands: astrolabe_webview::webdriver::WebDriverCommands,
     /// Waiting clients, with the tab's load count from before the navigation was
     /// asked for. The tab reports `Complete` for the page it is *already*
     /// showing, so the count is what tells the new load from the old one.
@@ -39,7 +39,7 @@ impl WebDriver {
     /// The engine must already be running: the server borrows its waker and the
     /// preferences it resets sessions to.
     pub fn start(port: u16) -> Option<Self> {
-        let commands = cosmic_webview::webdriver::start_webdriver(port)?;
+        let commands = astrolabe_webview::webdriver::start_webdriver(port)?;
         tracing::info!("WebDriver server listening on port {port}");
         Some(Self {
             commands,

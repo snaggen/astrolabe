@@ -1,5 +1,5 @@
-name := 'cosmic-web'
-appid := 'io.github.snaggen.CosmicWeb'
+name := 'astrolabe'
+appid := 'io.github.snaggen.Astrolabe'
 
 # Install destinations. Override `prefix` for a user install, e.g.
 #   just prefix=~/.local install

@@ -1,5 +1,5 @@
 [package]
-name = "cosmic-web"
+name = "astrolabe"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.93"
@@ -7,7 +7,7 @@ license = "EUPL-1.2"
 
 [dependencies]
 cosmic-config = { git = "https://github.com/pop-os/libcosmic", rev = "c003a58fff660f5c55ebfb54a5908722fa7d1d6e" }
-cosmic-webview = { git = "https://codeberg.org/snaggen/cosmic-webview", features = ["xdg-portal"] }
+astrolabe-webview = { git = "https://github.com/snaggen/astrolabe-webview", features = ["xdg-portal"] }
 libcosmic = { package = "libcosmic", git = "https://github.com/pop-os/libcosmic", rev = "c003a58fff660f5c55ebfb54a5908722fa7d1d6e", features = ["winit", "wgpu"] }
 
 async-channel = "2"
@@ -30,19 +30,19 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # with Servo's global allocator.
 adblock = { version = "0.13", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
 serde_json = "1"
-# Matches the image version cosmic-webview's screenshot() returns (RgbaImage).
+# Matches the image version astrolabe-webview's screenshot() returns (RgbaImage).
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 clap = { version = "4.6.6", features = ["derive"] }
 
 [features]
-# Gamepad API. Turns on the matching feature in cosmic-webview, which turns on
+# Gamepad API. Turns on the matching feature in astrolabe-webview, which turns on
 # Servo's; off by default because reading input devices is a fingerprinting
 # surface that most browsing does not need.
-gamepad = ["cosmic-webview/gamepad"]
+gamepad = ["astrolabe-webview/gamepad"]
 
 # WebDriver automation. Starts a protocol server when --webdriver-port is given,
 # for driving the browser from a test client.
-webdriver = ["cosmic-webview/webdriver"]
+webdriver = ["astrolabe-webview/webdriver"]
 
 [dev-dependencies]
 pollster = "1"

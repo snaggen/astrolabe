@@ -51,8 +51,8 @@ pub struct Notification {
     pub require_interaction: bool,
 }
 
-impl From<&cosmic_webview::Notification> for Notification {
-    fn from(notification: &cosmic_webview::Notification) -> Self {
+impl From<&astrolabe_webview::Notification> for Notification {
+    fn from(notification: &astrolabe_webview::Notification) -> Self {
         Self {
             title: notification.title.clone(),
             body: notification.body.clone(),
@@ -142,9 +142,9 @@ fn run(rx: async_channel::Receiver<Notification>) {
 
             match proxy
                 .notify(
-                    "cosmic-web",
+                    "astrolabe",
                     replaces,
-                    "io.github.snaggen.CosmicWeb",
+                    "io.github.snaggen.Astrolabe",
                     &notification.title,
                     &notification.body,
                     &[],

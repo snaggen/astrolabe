@@ -195,11 +195,11 @@ impl ThemeChoice {
     }
 
     /// The engine preference this choice maps to.
-    pub fn preference(self) -> cosmic_webview::ThemePreference {
+    pub fn preference(self) -> astrolabe_webview::ThemePreference {
         match self {
-            Self::System => cosmic_webview::ThemePreference::FollowSystem,
-            Self::Light => cosmic_webview::ThemePreference::Light,
-            Self::Dark => cosmic_webview::ThemePreference::Dark,
+            Self::System => astrolabe_webview::ThemePreference::FollowSystem,
+            Self::Light => astrolabe_webview::ThemePreference::Light,
+            Self::Dark => astrolabe_webview::ThemePreference::Dark,
         }
     }
 
@@ -440,8 +440,8 @@ impl Default for BrowserConfig {
 
 impl BrowserConfig {
     /// Build the engine's web-font configuration from these settings.
-    pub fn web_fonts(&self) -> cosmic_webview::WebFonts {
-        cosmic_webview::WebFonts {
+    pub fn web_fonts(&self) -> astrolabe_webview::WebFonts {
+        astrolabe_webview::WebFonts {
             serif: self.web_font_serif.clone(),
             sans_serif: self.web_font_sans_serif.clone(),
             monospace: self.web_font_monospace.clone(),

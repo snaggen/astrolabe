@@ -47,7 +47,7 @@ pub fn profile_dir() -> PathBuf {
     let dir = PROFILE_DIR.get().cloned().unwrap_or_else(|| {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("cosmic-web")
+            .join("astrolabe")
     });
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -698,7 +698,7 @@ mod tests {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("cosmic-web-test-{}-{n}.db", std::process::id()));
+            std::env::temp_dir().join(format!("astrolabe-test-{}-{n}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         open(path).await
     }

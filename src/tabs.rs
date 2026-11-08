@@ -1,8 +1,8 @@
-use async_channel::Receiver;
-use cosmic_webview::{
+use astrolabe_webview::{
     AllowOrDenyRequest, BluetoothDeviceSelectionRequest, FindBarState, PermissionRequest,
     ServoState,
 };
+use async_channel::Receiver;
 use dpi::PhysicalSize;
 use url::Url;
 

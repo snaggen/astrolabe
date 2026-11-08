@@ -1,13 +1,16 @@
-# cosmic-web
+# Astrolabe
 
-> **Note:** This project has no official connection to [System76](https://system76.com/) or
-> the [COSMIC Desktop Environment](https://github.com/pop-os/cosmic-epoch). The name is lazy
-> naming, nothing more.
+A web browser for the [COSMIC Desktop Environment](https://github.com/pop-os/cosmic-epoch), built
+on the [Servo](https://servo.org/) web engine. Servo is the engine; Astrolabe is the instrument
+you navigate by.
+
+> **Note:** This project has no official connection to [System76](https://system76.com/) or the
+> COSMIC Desktop Environment. It was originally called `cosmic-web` (and its engine widget
+> `cosmic-webview`) out of lazy naming, nothing more, and was renamed to make that clear.
 >
-> This is a personal, experimental project built for fun — to kick the tyres on
-> [Servo](https://servo.org/) as an embeddable engine, and to see how far AI-assisted
-> development can carry a moderately complex Rust codebase. It is not intended for real use and
-> will most likely never be.
+> This is a personal, experimental project built for fun — to kick the tyres on Servo as an
+> embeddable engine, and to see how far AI-assisted development can carry a moderately complex
+> Rust codebase. It is not intended for real use and will most likely never be.
 
 ![Screenshot](assets/screenshot.png)
 
@@ -15,7 +18,7 @@
 
 A web browser built on the [libcosmic](https://github.com/pop-os/libcosmic) UI toolkit (iced +
 wgpu) with [Servo](https://servo.org/) as the rendering engine, via the companion
-[cosmic-webview](https://codeberg.org/snaggen/cosmic-webview) library. The browser is a single
+[astrolabe-webview](https://github.com/snaggen/astrolabe-webview) library. The browser is a single
 binary that runs on Linux with X11 or Wayland.
 
 ## Features
@@ -55,7 +58,7 @@ LIBGL_ALWAYS_SOFTWARE=1 cargo run
 ## Command line
 
 ```
-cosmic-web [OPTIONS] [URL]
+astrolabe [OPTIONS] [URL]
 
       --profile-dir <DIR>     Cookies, history and other profile data
       --userscripts <DIR>     Directory to read *.js user scripts from

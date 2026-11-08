@@ -637,6 +637,57 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfdc70193dadb9d7287fa4b633f15f90c876915b31f6af17da307fc59c9859a8"
 
 [[package]]
+name = "astrolabe"
+version = "0.1.0"
+dependencies = [
+ "adblock",
+ "anyhow",
+ "astrolabe-webview",
+ "async-channel",
+ "clap",
+ "cosmic-config",
+ "dirs",
+ "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "image",
+ "libcosmic",
+ "pollster 1.0.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "turso",
+ "url",
+ "zbus",
+]
+
+[[package]]
+name = "astrolabe-webview"
+version = "0.1.0"
+source = "git+https://github.com/snaggen/astrolabe-webview#ccf88f5cf7a878f5b5f4ad343f73e7b1d2253be8"
+dependencies = [
+ "arboard",
+ "ash",
+ "async-channel",
+ "content-security-policy",
+ "crossbeam-channel",
+ "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "euclid",
+ "gilrs",
+ "gleam",
+ "glow 0.17.0",
+ "iced_wgpu",
+ "khronos-egl",
+ "libcosmic",
+ "rustls",
+ "servo",
+ "servo-webdriver-server",
+ "surfman",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2066,57 +2117,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "cosmic-web"
-version = "0.1.0"
-dependencies = [
- "adblock",
- "anyhow",
- "async-channel",
- "clap",
- "cosmic-config",
- "cosmic-webview",
- "dirs",
- "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "image",
- "libcosmic",
- "pollster 1.0.1",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "turso",
- "url",
- "zbus",
-]
-
-[[package]]
-name = "cosmic-webview"
-version = "0.1.0"
-source = "git+https://codeberg.org/snaggen/cosmic-webview#0c9957968c4d6d3e4f2722051f5e76308955db24"
-dependencies = [
- "arboard",
- "ash",
- "async-channel",
- "content-security-policy",
- "crossbeam-channel",
- "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "euclid",
- "gilrs",
- "gleam",
- "glow 0.17.0",
- "iced_wgpu",
- "khronos-egl",
- "libcosmic",
- "rustls",
- "servo",
- "servo-webdriver-server",
- "surfman",
- "tracing",
- "url",
 ]
 
 [[package]]

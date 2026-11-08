@@ -2,7 +2,7 @@
 //!
 //! Exposes the active tab's Media Session to the desktop so COSMIC's media
 //! applet and hardware media keys can see metadata / playback status and drive
-//! playback. The engine half lives in cosmic-webview (`ServoState::media_*` and
+//! playback. The engine half lives in astrolabe-webview (`ServoState::media_*` and
 //! `send_media_action`); this module bridges it to D-Bus.
 //!
 //! The server runs on a dedicated thread with its own current-thread Tokio
@@ -11,7 +11,7 @@
 //! - `state_tx`: app → server, latest metadata/status to publish.
 //! - `action_rx`: server → app, media actions requested over D-Bus.
 
-use cosmic_webview::MediaSessionActionType;
+use astrolabe_webview::MediaSessionActionType;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{ObjectPath, OwnedValue, Value};
 use zbus::{connection, interface};
@@ -81,7 +81,7 @@ impl RootInterface {
     }
     #[zbus(property)]
     fn identity(&self) -> &str {
-        "COSMIC Web"
+        "Astrolabe"
     }
     #[zbus(property)]
     fn supported_uri_schemes(&self) -> Vec<String> {
@@ -225,7 +225,7 @@ fn build_metadata(update: &MediaUpdate) -> std::collections::HashMap<String, Own
 }
 
 const OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
-const BUS_NAME: &str = "org.mpris.MediaPlayer2.cosmicweb";
+const BUS_NAME: &str = "org.mpris.MediaPlayer2.astrolabe";
 
 /// Starts the MPRIS server on a dedicated thread and returns a handle, or `None`
 /// if the thread could not be spawned. D-Bus connection failures (e.g. no

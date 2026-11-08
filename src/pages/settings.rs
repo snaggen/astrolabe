@@ -565,7 +565,7 @@ fn permissions_section(permissions: Permissions<'_>) -> Element<'_, Message> {
                 .on_press(Message::ResetAllSitePermissions),
         );
         for (domain, key, allow) in permissions.grants {
-            let label = cosmic_webview::permission::feature_label_from_key(key).unwrap_or(key);
+            let label = astrolabe_webview::permission::feature_label_from_key(key).unwrap_or(key);
             let decision = if *allow { "Allow" } else { "Block" };
             let revoke = widget::tooltip(
                 widget::button::icon(widget::icon::from_name("user-trash-symbolic"))

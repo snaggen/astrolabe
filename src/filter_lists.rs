@@ -1,6 +1,6 @@
 //! Filter list download and disk cache.
 //!
-//! Lists are stored in `$XDG_CACHE_HOME/cosmic-web/filter-lists/<id>.txt`.
+//! Lists are stored in `$XDG_CACHE_HOME/astrolabe/filter-lists/<id>.txt`.
 //! A cached file is considered fresh for [`MAX_AGE`]; after that it is
 //! re-downloaded transparently in the background.
 
@@ -31,7 +31,7 @@ pub const STRICT_EXTRA_LISTS: &[(&str, &str)] = &[
 
 /// Returns the cache directory for filter lists, creating it if absent.
 pub fn cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("cosmic-web").join("filter-lists"))
+    dirs::cache_dir().map(|d| d.join("astrolabe").join("filter-lists"))
 }
 
 /// Load filter-list text from disk cache, downloading if missing or stale.

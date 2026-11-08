@@ -1,7 +1,7 @@
 //! On-disk cache of New Tab page tile images: page thumbnails and favicons.
 //!
 //! Thumbnails are captured from the rendered page (see
-//! [`cosmic_webview::ServoState::screenshot`]); favicons are fetched from each
+//! [`astrolabe_webview::ServoState::screenshot`]); favicons are fetched from each
 //! site's `/favicon.ico`. Both are stored as PNG under the XDG cache directory
 //! and refreshed once they pass [`MAX_AGE`].
 
@@ -118,7 +118,7 @@ pub async fn fetch_favicon(url: String) -> anyhow::Result<()> {
 fn cache_subdir(name: &str) -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("cosmic-web")
+        .join("astrolabe")
         .join(name)
 }
 
@@ -169,15 +169,14 @@ mod tests {
 
     #[test]
     fn missing_file_is_stale() {
-        let path = std::env::temp_dir().join("cosmic-web-nonexistent-xyz.png");
+        let path = std::env::temp_dir().join("astrolabe-nonexistent-xyz.png");
         let _ = std::fs::remove_file(&path);
         assert!(is_stale(&path, MAX_AGE));
     }
 
     #[test]
     fn fresh_file_is_not_stale() {
-        let path =
-            std::env::temp_dir().join(format!("cosmic-web-fresh-{}.png", std::process::id()));
+        let path = std::env::temp_dir().join(format!("astrolabe-fresh-{}.png", std::process::id()));
         std::fs::write(&path, b"x").expect("write temp file");
         assert!(!is_stale(&path, MAX_AGE));
         // A zero max-age makes any existing file count as stale.

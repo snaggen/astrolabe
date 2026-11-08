@@ -1,12 +1,12 @@
 [Desktop Entry]
-Name=COSMIC Web
+Name=Astrolabe
 GenericName=Web Browser
 Comment=A web browser for the COSMIC desktop
 Categories=Network;WebBrowser;
-Exec=cosmic-web %u
-Icon=io.github.snaggen.CosmicWeb
+Exec=astrolabe %u
+Icon=io.github.snaggen.Astrolabe
 Terminal=false
 Type=Application
 StartupNotify=true
-StartupWMClass=io.github.snaggen.CosmicWeb
+StartupWMClass=io.github.snaggen.Astrolabe
 MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;

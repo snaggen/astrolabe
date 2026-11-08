@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use cosmic_webview::PermissionFeature;
+use astrolabe_webview::PermissionFeature;
 use libcosmic::iced::{Alignment, Length};
 use libcosmic::prelude::*;
 use libcosmic::widget;
@@ -376,7 +376,7 @@ fn appearance_popup<'a>(
 
 /// Human-readable name for a permission feature.
 fn permission_label(feature: PermissionFeature) -> &'static str {
-    cosmic_webview::permission::feature_label(feature)
+    astrolabe_webview::permission::feature_label(feature)
 }
 
 /// The permissions indicator: a key icon shown only when the site has a stored
