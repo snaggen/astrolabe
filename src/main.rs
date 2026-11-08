@@ -7,6 +7,7 @@ mod db;
 mod filter_engine;
 mod filter_lists;
 mod frosted;
+mod migrate;
 mod mpris;
 mod notifications;
 mod pages;
@@ -28,6 +29,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bad arguments, --help and --version all exit here, before the engine starts.
     let options = cli::Cli::parse();
+
+    // Before anything reads or creates the data directories.
+    migrate::migrate_from_cosmic_web();
 
     // Directory overrides must land before anything reads the defaults.
     if let Some(dir) = options.profile_dir.clone() {
