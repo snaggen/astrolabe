@@ -497,6 +497,10 @@ pub enum Message {
     ResetAllSitePermissions,
     /// Toggle whether sites may use the camera and microphone (settings drawer).
     SetAllowCameraMicrophone(bool),
+    /// Switch an experimental web-platform feature on or off (settings page).
+    SetExperimentalFeature(astrolabe_webview::ExperimentalFeature, bool),
+    /// Put every experimental feature back to its default (settings page).
+    ResetExperimentalFeatures,
     // ── Web fonts (settings drawer) ─────────────────────────────────────────────
     /// Set the default serif font family for web content.
     SetWebFontSerif(String),
@@ -2115,6 +2119,7 @@ pub fn load_config_and_start_engine(cli: crate::cli::Cli) -> Flags {
     // Apply the camera/microphone opt-in before the engine starts so it is in
     // effect from the first page load.
     astrolabe_webview::set_camera_microphone_enabled(config.allow_camera_microphone);
+    crate::experimental_features::apply(&config);
     // Apply web-content fonts before the engine starts.
     astrolabe_webview::set_web_fonts(config.web_fonts());
     // Enable the remote devtools server if configured. `--devtools-port` turns
@@ -3388,6 +3393,23 @@ impl libcosmic::Application for App {
                 self.write_config(|c, h| c.set_allow_camera_microphone(h, on));
                 // Update the running engine; takes effect on the next page load.
                 astrolabe_webview::set_camera_microphone_enabled(on);
+            }
+            Message::SetExperimentalFeature(feature, on) => {
+                self.write_config(|c, h| {
+                    let mut names = c.experimental_features.clone();
+                    names.retain(|name| name != feature.pref_name());
+                    if on {
+                        names.push(feature.pref_name().to_string());
+                    }
+                    c.set_experimental_features(h, names)
+                });
+                // Takes effect on the next page load.
+                astrolabe_webview::set_experimental_feature(feature, on);
+            }
+            Message::ResetExperimentalFeatures => {
+                let defaults = crate::experimental_features::default_enabled();
+                self.write_config(|c, h| c.set_experimental_features(h, defaults));
+                crate::experimental_features::apply(&self.config);
             }
             Message::SetWebFontSerif(family) => {
                 self.write_config(|c, h| c.set_web_font_serif(h, family));

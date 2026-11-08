@@ -409,6 +409,9 @@ pub struct BrowserConfig {
     /// File names (within the userscripts directory) that are currently turned
     /// off. Scripts not listed here are enabled; new files default to enabled.
     pub disabled_userscripts: Vec<String>,
+    /// Servo preference names of the experimental web-platform features that
+    /// are switched on (see [`crate::experimental_features`]).
+    pub experimental_features: Vec<String>,
 }
 
 impl Default for BrowserConfig {
@@ -434,11 +437,22 @@ impl Default for BrowserConfig {
             web_font_monospace_size: 13,
             user_stylesheet_enabled: true,
             disabled_userscripts: Vec::new(),
+            experimental_features: crate::experimental_features::default_enabled(),
         }
     }
 }
 
 impl BrowserConfig {
+    /// Whether the user has switched `feature` on.
+    pub fn experimental_feature_enabled(
+        &self,
+        feature: astrolabe_webview::ExperimentalFeature,
+    ) -> bool {
+        self.experimental_features
+            .iter()
+            .any(|name| name == feature.pref_name())
+    }
+
     /// Build the engine's web-font configuration from these settings.
     pub fn web_fonts(&self) -> astrolabe_webview::WebFonts {
         astrolabe_webview::WebFonts {

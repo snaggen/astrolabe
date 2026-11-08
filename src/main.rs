@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod config;
 mod db;
+mod experimental_features;
 mod filter_engine;
 mod filter_lists;
 mod frosted;

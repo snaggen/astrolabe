@@ -8,6 +8,7 @@ use crate::config::{
     BUILTIN_ENGINES, BrowserConfig, ClearRange, CookieProtectionLevel, PermissionDefault,
     PermissionDefaults, PermissionKind, SearchEngine, StartupPage, ThemeChoice,
 };
+use crate::experimental_features::{CATALOGUE, Group};
 
 /// Selectable column counts for the New Tab grid.
 const COLUMN_CHOICES: &[u16] = &[3, 4, 5, 6, 7, 8];
@@ -122,6 +123,8 @@ pub enum SettingsSection {
     UserContent,
     /// Remote devtools server configuration.
     Developer,
+    /// Experimental web-platform features.
+    Experimental,
 }
 
 impl SettingsSection {
@@ -134,6 +137,7 @@ impl SettingsSection {
         SettingsSection::ClearData,
         SettingsSection::UserContent,
         SettingsSection::Developer,
+        SettingsSection::Experimental,
     ];
 
     /// The label shown in the side navigation.
@@ -146,6 +150,7 @@ impl SettingsSection {
             SettingsSection::ClearData => "Clear data",
             SettingsSection::UserContent => "User content",
             SettingsSection::Developer => "Developer",
+            SettingsSection::Experimental => "Experimental",
         }
     }
 }
@@ -186,6 +191,7 @@ pub fn view<'a>(
         SettingsSection::ClearData => data_clearing_section(clearing),
         SettingsSection::UserContent => user_content_section(config, user_scripts),
         SettingsSection::Developer => developer_section(config, devtools_port_str),
+        SettingsSection::Experimental => experimental_section(config),
     };
     let scroll = widget::scrollable(
         widget::container(content)
@@ -700,4 +706,46 @@ fn developer_section<'a>(config: &'a BrowserConfig, port_str: &'a str) -> Elemen
             .into(),
     ])
     .into()
+}
+
+/// The "Experimental" section: an introduction with a reset control, then one
+/// group of feature toggles per category.
+fn experimental_section(config: &BrowserConfig) -> Element<'_, Message> {
+    let intro = widget::settings::section()
+        .title("Experimental features")
+        .add(widget::text::caption(
+            "Web features that Servo includes but has not finished. They make more \
+             sites work, but can also break pages or crash the browser. Changes \
+             apply to pages loaded afterwards.",
+        ))
+        .add(
+            widget::settings::item::builder("Restore defaults")
+                .description("Turn on the features servoshell enables in its experimental mode, and turn off the rest.")
+                .control(
+                    widget::button::standard("Restore")
+                        .on_press(Message::ResetExperimentalFeatures),
+                ),
+        );
+
+    let mut sections: Vec<Element<'_, Message>> = vec![intro.into()];
+    for &group in Group::ALL {
+        sections.push(experimental_group(config, group));
+    }
+    widget::settings::view_column(sections).into()
+}
+
+/// One titled group of experimental-feature toggles.
+fn experimental_group(config: &BrowserConfig, group: Group) -> Element<'_, Message> {
+    let mut section = widget::settings::section().title(group.title());
+    for info in CATALOGUE.iter().filter(|info| info.group == group) {
+        let feature = info.feature;
+        section = section.add(
+            widget::settings::item::builder(info.title)
+                .description(info.description)
+                .toggler(config.experimental_feature_enabled(feature), move |on| {
+                    Message::SetExperimentalFeature(feature, on)
+                }),
+        );
+    }
+    section.into()
 }
