@@ -9,6 +9,10 @@ base-dir := absolute_path(clean(rootdir / prefix))
 
 bin-src := 'target/release' / name
 bin-dst := base-dir / 'bin' / name
+# Where the binary ends up once installed (without `rootdir`, which is only a
+# staging directory). The desktop entry runs this path, since launchers do not
+# always have `prefix`/bin, such as ~/.local/bin, in their PATH.
+bin-exec := absolute_path(clean(prefix)) / 'bin' / name
 
 desktop := appid + '.desktop'
 desktop-src := 'res' / desktop
@@ -29,14 +33,14 @@ build-release:
 # Install the binary, desktop entry, and icon under `prefix`.
 install:
     install -Dm0755 {{bin-src}} {{bin-dst}}
-    install -Dm0644 {{desktop-src}} {{desktop-dst}}
+    sed 's|^Exec={{name}} |Exec={{bin-exec}} |' {{desktop-src}} | install -Dm0644 /dev/stdin {{desktop-dst}}
     install -Dm0644 {{icon-src}} {{icon-dst}}
     install -Dm0644 {{svg-icon-src}} {{svg-icon-dst}}
 
 # Install only the desktop entry and icon (enough for the window icon to show
 # when running via `cargo run`, since the compositor matches the app id).
 install-resources:
-    install -Dm0644 {{desktop-src}} {{desktop-dst}}
+    sed 's|^Exec={{name}} |Exec={{bin-exec}} |' {{desktop-src}} | install -Dm0644 /dev/stdin {{desktop-dst}}
     install -Dm0644 {{icon-src}} {{icon-dst}}
     install -Dm0644 {{svg-icon-src}} {{svg-icon-dst}}
 
