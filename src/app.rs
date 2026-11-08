@@ -4,10 +4,9 @@ use std::path::PathBuf;
 
 use crate::mpris::{MediaUpdate, PlaybackStatus};
 use astrolabe_webview::{
-    ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EditingActionEvent,
-    EmbedderControl, FIND_BAR_ID, FindBar, FindBarMsg, FindBarState, FindResult, InputEvent,
-    MediaSessionActionType, MediaSessionPlaybackState, PermissionFeature, WebViewWidget,
-    permission,
+    ClipboardAction, ContextMenu, ContextMenuAction, ContextMenuItem, DialogMsg, EmbedderControl,
+    FIND_BAR_ID, FindBar, FindBarMsg, FindBarState, FindResult, InputEvent, MediaSessionActionType,
+    MediaSessionPlaybackState, PermissionFeature, WebViewWidget, permission,
 };
 use dpi::{PhysicalPosition, PhysicalSize};
 use libcosmic::app::context_drawer;
@@ -929,18 +928,18 @@ impl App {
                 let ids = self.webview_ids();
                 reply("GetAllWebViews", sender.send(ids));
             }
-            Msg::GetFocusedWebView(sender) => {
+            Msg::GetWebViewSelectedForInteraction(sender) => {
                 let id = self
                     .tabs
                     .active_data::<TabState>()
                     .map(|tab| tab.servo.webview_id());
-                reply("GetFocusedWebView", sender.send(id));
+                reply("GetWebViewSelectedForInteraction", sender.send(id));
             }
             Msg::IsWebViewOpen(webview, sender) => {
                 let open = self.tab_for_webview(webview).is_some();
                 reply("IsWebViewOpen", sender.send(open));
             }
-            Msg::FocusWebView(webview) => {
+            Msg::SelectWebViewForInteraction(webview) => {
                 if let Some(id) = self.tab_for_webview(webview) {
                     self.tabs.activate(id);
                     self.sync_tab_visibility();
@@ -2787,7 +2786,7 @@ impl libcosmic::Application for App {
                 self.dismiss_context_menu();
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
                     tab.servo
-                        .send_input(InputEvent::EditingAction(EditingActionEvent::Copy));
+                        .send_input(InputEvent::EditingAction(ClipboardAction::Copy));
                 }
             }
 
@@ -2795,7 +2794,7 @@ impl libcosmic::Application for App {
                 self.dismiss_context_menu();
                 if let Some(tab) = self.tabs.active_data_mut::<TabState>() {
                     tab.servo
-                        .send_input(InputEvent::EditingAction(EditingActionEvent::Paste));
+                        .send_input(InputEvent::EditingAction(ClipboardAction::Paste));
                 }
             }
 
