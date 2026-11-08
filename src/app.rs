@@ -479,6 +479,8 @@ pub enum Message {
     ClearBrowsingData,
     /// Clear all data (cookies, site storage, history) for a single site.
     ClearSiteData(String),
+    /// Filter the list of sites with stored data by this text.
+    SetSiteDataFilter(String),
     /// Answer the active tab's pending permission request (prompt banner).
     PermissionRespond(PermissionResponse),
     /// Clear a permission decision for the active site (permissions popover).
@@ -721,6 +723,8 @@ pub struct App {
     /// Domains that currently hold cookies or web storage, shown for per-site
     /// clearing. Refreshed when the settings drawer opens and after each clear.
     site_data_domains: Vec<String>,
+    /// Text the list of sites with stored data is filtered by.
+    site_data_filter: String,
     /// True while the "Clear browsing data" confirmation dialog is shown.
     clear_confirm_open: bool,
     // ── Permissions ────────────────────────────────────────────────────────────
@@ -2265,6 +2269,7 @@ impl libcosmic::Application for App {
             clear_history_checked: true,
             clear_cookies_checked: true,
             site_data_domains: Vec::new(),
+            site_data_filter: String::new(),
             clear_confirm_open: false,
             site_permissions: HashMap::new(),
             site_settings: HashMap::new(),
@@ -3323,6 +3328,7 @@ impl libcosmic::Application for App {
                 return self.clear_browsing_data();
             }
             Message::ClearSiteData(domain) => return self.clear_site(domain),
+            Message::SetSiteDataFilter(filter) => self.site_data_filter = filter,
 
             Message::PermissionRespond(response) => {
                 // Answer the engine, then record the choice (capture domain +
@@ -4063,6 +4069,7 @@ impl libcosmic::Application for App {
                     history_checked: self.clear_history_checked,
                     cookies_checked: self.clear_cookies_checked,
                     site_domains: &self.site_data_domains,
+                    site_filter: &self.site_data_filter,
                 },
                 pages::settings::Permissions {
                     defaults: &self.config.permission_defaults,

@@ -32,6 +32,8 @@ pub struct DataClearing<'a> {
     pub cookies_checked: bool,
     /// Domains that currently hold cookies or web storage, for per-site clearing.
     pub site_domains: &'a [String],
+    /// Text the per-site list is filtered by; empty shows every site.
+    pub site_filter: &'a str,
 }
 
 /// State for the "Site permissions" settings section.
@@ -447,6 +449,18 @@ fn appearance_section(config: &BrowserConfig) -> Element<'_, Message> {
     .into()
 }
 
+/// The domains containing `filter`, ignoring case and surrounding spaces. An
+/// empty filter matches every domain.
+fn matching_domains<'a>(
+    domains: &'a [String],
+    filter: &str,
+) -> impl Iterator<Item = &'a String> + use<'a> {
+    let filter = filter.trim().to_lowercase();
+    domains
+        .iter()
+        .filter(move |domain| domain.to_lowercase().contains(&filter))
+}
+
 /// Build the "Clear browsing data" section: a time-range dropdown, category
 /// toggles, a clear button, and a per-site list.
 fn data_clearing_section(clearing: DataClearing<'_>) -> Element<'_, Message> {
@@ -492,12 +506,18 @@ fn data_clearing_section(clearing: DataClearing<'_>) -> Element<'_, Message> {
     let mut sections = vec![clearing_section.into()];
 
     if !clearing.site_domains.is_empty() {
+        let filter = widget::search_input("Filter sites", clearing.site_filter)
+            .on_input(Message::SetSiteDataFilter)
+            .on_clear(Message::SetSiteDataFilter(String::new()));
         let mut sites = widget::settings::section()
             .title("Sites with stored data")
             .add(widget::text::caption(
                 "Remove cookies, site storage, and history for a single site.",
-            ));
-        for domain in clearing.site_domains {
+            ))
+            .add(filter);
+        let mut shown = 0;
+        for domain in matching_domains(clearing.site_domains, clearing.site_filter) {
+            shown += 1;
             let remove = widget::tooltip(
                 widget::button::icon(widget::icon::from_name("user-trash-symbolic"))
                     .on_press(Message::ClearSiteData(domain.clone())),
@@ -510,6 +530,9 @@ fn data_clearing_section(clearing: DataClearing<'_>) -> Element<'_, Message> {
                 .align_y(Alignment::Center)
                 .spacing(spacing.space_xxs);
             sites = sites.add(row);
+        }
+        if shown == 0 {
+            sites = sites.add(widget::text::caption("No sites match the filter."));
         }
         sections.push(sites.into());
     }
@@ -748,4 +771,33 @@ fn experimental_group(config: &BrowserConfig, group: Group) -> Element<'_, Messa
         );
     }
     section.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn domains() -> Vec<String> {
+        ["phoronix.com", "aftonbladet.se", "news.phoronix.com"]
+            .map(String::from)
+            .to_vec()
+    }
+
+    #[test]
+    fn empty_filter_matches_every_site() {
+        let all = domains();
+        assert_eq!(matching_domains(&all, "  ").count(), all.len());
+    }
+
+    #[test]
+    fn filter_matches_part_of_domain_ignoring_case() {
+        let all = domains();
+        let found: Vec<_> = matching_domains(&all, " PHO").collect();
+        assert_eq!(found, ["phoronix.com", "news.phoronix.com"]);
+    }
+
+    #[test]
+    fn filter_without_match_finds_nothing() {
+        assert_eq!(matching_domains(&domains(), "slashdot").count(), 0);
+    }
 }
