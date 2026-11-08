@@ -177,6 +177,12 @@ pub const CATALOGUE: &[FeatureInfo] = {
             "Styles that adapt to the size of their container instead of the window.",
         ),
         info(
+            F::HasSelector,
+            G::Css,
+            "The :has() selector",
+            "Styles an element by what it contains. Many sites need it for their layout. Styles may not update when a page changes itself afterwards.",
+        ),
+        info(
             F::CssColumns,
             G::Css,
             "Multi-column layout",
@@ -228,7 +234,8 @@ pub const CATALOGUE: &[FeatureInfo] = {
 };
 
 /// Features on until the user changes them: those servoshell turns on with
-/// `--enable-experimental-web-platform-features`.
+/// `--enable-experimental-web-platform-features`, plus `:has()`, without which
+/// sites such as aftonbladet.se lay out their content off-screen.
 const ON_BY_DEFAULT: &[ExperimentalFeature] = &[
     ExperimentalFeature::AsyncClipboard,
     ExperimentalFeature::ContainerQueries,
@@ -237,6 +244,7 @@ const ON_BY_DEFAULT: &[ExperimentalFeature] = &[
     ExperimentalFeature::ExecCommand,
     ExperimentalFeature::FontFace,
     ExperimentalFeature::FontVariations,
+    ExperimentalFeature::HasSelector,
     ExperimentalFeature::IndexedDb,
     ExperimentalFeature::IntersectionObserver,
     ExperimentalFeature::OffscreenCanvas,

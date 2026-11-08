@@ -641,7 +641,7 @@ dependencies = [
 [[package]]
 name = "astrolabe-webview"
 version = "0.1.0"
-source = "git+https://github.com/snaggen/astrolabe-webview#b9dc41105f0351afae81b6191bf5b79bee11325c"
+source = "git+https://github.com/snaggen/astrolabe-webview#190bc0e1b03979da882c8c06beb5a9d11b7a2ea3"
 dependencies = [
  "arboard",
  "ash",
@@ -659,6 +659,7 @@ dependencies = [
  "rustls",
  "servo",
  "servo-webdriver-server",
+ "stylo_static_prefs",
  "surfman",
  "tracing",
  "url",
