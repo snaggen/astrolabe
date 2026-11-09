@@ -47,6 +47,34 @@ const ZOOM_MAX: f32 = 5.0;
 /// History rows fetched for the grid; trimmed to the visible cell count in `view`.
 const NEW_TAB_TOP_SITES: usize = 48;
 
+/// Widest a tab may grow, in logical pixels. Chrome caps tabs at 240 px;
+/// Firefox at 225 px.
+const TAB_MAX_WIDTH: f32 = 240.0;
+
+/// Widest the tab bar may be with `tabs` tabs, so no tab exceeds
+/// [`TAB_MAX_WIDTH`]. The tab bar has no spacing between tabs.
+fn tab_bar_max_width(tabs: usize) -> f32 {
+    tabs.max(1) as f32 * TAB_MAX_WIDTH
+}
+
+/// Width taken by the new-tab button and the gap before it: a 16 px icon (the
+/// icon button default) with `space_xxs` padding on each side.
+fn new_tab_button_room(spacing: libcosmic::cosmic_theme::Spacing) -> f32 {
+    f32::from(16 + 2 * spacing.space_xxs + spacing.space_xxxs)
+}
+
+/// Width of the tab bar when `available` pixels are left for it and the new-tab
+/// button. While every tab fits at [`TAB_MAX_WIDTH`] the bar is exactly that wide,
+/// so the button follows the last tab; otherwise the tabs fill the space and shrink.
+fn tab_bar_width(available: f32, tabs: usize, button_room: f32) -> Length {
+    let max = tab_bar_max_width(tabs);
+    if available >= max + button_room {
+        Length::Fixed(max)
+    } else {
+        Length::Fill
+    }
+}
+
 /// Map a permission feature to its configurable global-default category, if it
 /// has one. Features without a dedicated default always fall back to "ask".
 ///
@@ -3987,18 +4015,37 @@ impl libcosmic::Application for App {
     }
 
     fn header_center(&self) -> Vec<Element<'_, Message>> {
-        let tab_bar = widget::tab_bar::horizontal(&self.tabs)
-            .show_close_icon_on_hover(true)
-            .on_activate(Message::TabActivated)
-            .on_close(Message::TabClosed)
-            // Gap between the favicon and the tab title (defaults to 0).
-            .button_spacing(libcosmic::theme::spacing().space_xxs)
-            .width(Length::Fill);
+        // The tab bar shares its width equally between tabs and a row stretches a
+        // `Fill` child to all the space it has, so a max width on the bar is
+        // ignored. Pick the bar's width from the space actually available instead.
+        let tabs = widget::responsive(move |size| {
+            let spacing = libcosmic::theme::spacing();
+            let tab_bar = widget::tab_bar::horizontal(&self.tabs)
+                .show_close_icon_on_hover(true)
+                .on_activate(Message::TabActivated)
+                .on_close(Message::TabClosed)
+                // Gap between the favicon and the tab title (defaults to 0).
+                .button_spacing(spacing.space_xxs)
+                .width(Length::Fill);
+            // The tab bar takes all the width it is offered whatever its own
+            // `width`, so a container sets it.
+            let tab_bar = widget::container(tab_bar).width(tab_bar_width(
+                size.width,
+                self.tabs.len(),
+                new_tab_button_room(spacing),
+            ));
 
-        let new_tab_btn = widget::button::icon(widget::icon::from_name("tab-new-symbolic"))
-            .on_press(Message::TabNew);
+            let new_tab_btn = widget::button::icon(widget::icon::from_name("tab-new-symbolic"))
+                .on_press(Message::TabNew);
 
-        vec![tab_bar.into(), new_tab_btn.into()]
+            widget::row::with_children(vec![tab_bar.into(), new_tab_btn.into()])
+                .spacing(spacing.space_xxxs)
+                .align_y(libcosmic::iced::Alignment::Center)
+                .into()
+        })
+        .height(Length::Shrink);
+
+        vec![tabs.into()]
     }
 
     fn dialog(&self) -> Option<Element<'_, Message>> {
@@ -4228,6 +4275,21 @@ impl libcosmic::Application for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_bar_max_width_grows_per_tab() {
+        assert_eq!(tab_bar_max_width(0), TAB_MAX_WIDTH);
+        assert_eq!(tab_bar_max_width(1), TAB_MAX_WIDTH);
+        assert_eq!(tab_bar_max_width(3), 3.0 * TAB_MAX_WIDTH);
+    }
+
+    #[test]
+    fn tab_bar_width_caps_tabs_while_they_fit() {
+        assert_eq!(tab_bar_width(1000.0, 2, 40.0), Length::Fixed(480.0));
+        assert_eq!(tab_bar_width(520.0, 2, 40.0), Length::Fixed(480.0));
+        assert_eq!(tab_bar_width(519.0, 2, 40.0), Length::Fill);
+        assert_eq!(tab_bar_width(1000.0, 10, 40.0), Length::Fill);
+    }
 
     #[test]
     fn logical_to_physical_scales_and_rounds() {
