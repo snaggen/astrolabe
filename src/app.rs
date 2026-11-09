@@ -47,6 +47,10 @@ const ZOOM_MAX: f32 = 5.0;
 /// History rows fetched for the grid; trimmed to the visible cell count in `view`.
 const NEW_TAB_TOP_SITES: usize = 48;
 
+/// How long after a page reports itself loaded its New Tab thumbnail is taken,
+/// so the capture shows the page fully drawn.
+const THUMBNAIL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Widest a tab may grow, in logical pixels. Chrome caps tabs at 240 px;
 /// Firefox at 225 px.
 const TAB_MAX_WIDTH: f32 = 240.0;
@@ -436,6 +440,8 @@ pub enum Message {
     PinnedLoaded(Vec<BookmarkEntry>),
     /// A thumbnail or favicon finished writing; refresh the tile-image map.
     TileImagesChanged,
+    /// Time to capture the thumbnail of the active tab's page, if it still shows this URL.
+    CaptureThumbnail(String),
     /// Pointer entered a New Tab grid cell; reveals its pin button.
     TileHovered(String),
     /// Pointer left the hovered New Tab grid cell.
@@ -1726,9 +1732,14 @@ impl App {
         self.tile_images = images;
     }
 
-    /// Capture a thumbnail and fetch a favicon for the active tab once its
-    /// current page has finished loading. No-op until the page is complete, for
-    /// non-HTTP(S) URLs, or when this URL was already captured.
+    /// Schedule a thumbnail and favicon for the active tab once its current page
+    /// has finished loading. No-op until the page is complete, for non-HTTP(S)
+    /// URLs, or when this URL was already scheduled.
+    ///
+    /// A page reports itself complete before it is fully painted, so capturing
+    /// right away caught half-drawn pages. The capture waits
+    /// [`THUMBNAIL_DELAY`] instead; a static page draws no more frames, so
+    /// waiting for the next frame would never fire.
     fn maybe_capture_active_thumbnail(&mut self) -> Task<Message> {
         use astrolabe_webview::LoadStatus;
 
@@ -1749,6 +1760,24 @@ impl App {
             return Task::none();
         }
         tab.thumb_captured_url = Some(url.clone());
+
+        Task::perform(tokio::time::sleep(THUMBNAIL_DELAY), move |()| {
+            libcosmic::action::app(Message::CaptureThumbnail(url.clone()))
+        })
+    }
+
+    /// Capture a thumbnail and fetch a favicon for `url`, if the active tab
+    /// still shows it fully loaded.
+    fn capture_active_thumbnail(&mut self, url: String) -> Task<Message> {
+        use astrolabe_webview::LoadStatus;
+
+        let Some(tab) = self.tabs.active_data::<TabState>() else {
+            return Task::none();
+        };
+        let still_showing = tab.servo.current_url().map(|u| u.to_string()) == Some(url.clone());
+        if !still_showing || tab.servo.load_status() != LoadStatus::Complete {
+            return Task::none();
+        }
 
         let mut tasks = Vec::new();
 
@@ -3189,6 +3218,8 @@ impl libcosmic::Application for App {
                 self.rebuild_tile_images();
                 return self.fetch_missing_favicons();
             }
+
+            Message::CaptureThumbnail(url) => return self.capture_active_thumbnail(url),
 
             Message::TileImagesChanged => {
                 self.rebuild_tile_images();
