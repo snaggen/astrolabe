@@ -2512,13 +2512,19 @@ impl libcosmic::Application for App {
                             None
                         };
 
-                        // Keep URL bar in sync unless the user is typing.
+                        tab.sync_new_tab_page();
+                        // Keep URL bar in sync unless the user is typing. The New
+                        // Tab page leaves it empty: the about:blank under it is
+                        // not an address the user went to.
                         if !tab.url_bar_focused
                             && let Some(url) = tab.servo.current_url()
                         {
-                            tab.url_bar_text = url.to_string();
+                            tab.url_bar_text = if tab.show_new_tab_page {
+                                String::new()
+                            } else {
+                                url.to_string()
+                            };
                         }
-                        tab.sync_new_tab_page();
 
                         // A page may ask for a permission (geolocation, camera, …).
                         // Capture it with the requesting domain; the decision needs

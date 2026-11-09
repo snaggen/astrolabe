@@ -101,7 +101,7 @@ pub struct AddressBar<'a> {
 impl<'a> AddressBar<'a> {
     /// Build the address bar element.
     pub fn view(self) -> Element<'a, Message> {
-        let input = widget::text_input("https://example.com", self.text)
+        let input = widget::text_input("Search or enter address", self.text)
             .id(URL_BAR_ID.clone())
             .on_focus(Message::UrlBarFocused)
             .on_unfocus(Message::UrlBarUnfocused)

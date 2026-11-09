@@ -124,6 +124,9 @@ impl TabState {
     pub fn set_opens_on_new_tab_page(&mut self, show: bool) {
         self.show_new_tab_page = show;
         self.new_tab_entry = show.then(NewTabEntry::default);
+        if show {
+            self.url_bar_text.clear();
+        }
     }
 
     /// Show the New Tab page when history navigation returns to the tab's first
