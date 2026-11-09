@@ -16,7 +16,12 @@ you navigate by.
 > embeddable engine, and to see how far AI-assisted development can carry a moderately complex
 > Rust codebase. It is not intended for real use and will most likely never be.
 
-![Screenshot](assets/screenshot.png)
+![Astrolabe showing servo.org, with two more tabs open](assets/screenshot.png)
+
+<p align="center">
+  <img src="assets/new-tab.png" width="49%" alt="The New Tab page with pinned and most visited sites">
+  <img src="assets/settings.png" width="49%" alt="The settings page">
+</p>
 
 ## Overview
 
