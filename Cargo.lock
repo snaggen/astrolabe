@@ -641,7 +641,7 @@ dependencies = [
 [[package]]
 name = "astrolabe-webview"
 version = "0.1.0"
-source = "git+https://github.com/snaggen/astrolabe-webview#12d859504211b6b9d009670fdcf55ef479b56bea"
+source = "git+https://github.com/snaggen/astrolabe-webview#fecf724c657fa499becf29ac2fbd037e16552db0"
 dependencies = [
  "arboard",
  "ash",

@@ -1228,7 +1228,7 @@ impl App {
     /// `show_new_tab_page` makes the tab open on the internal New Tab page.
     fn add_tab(&mut self, url: Url, show_new_tab_page: bool) -> segmented_button::Entity {
         let (mut tab, _rx) = TabState::new(url, self.current_size, self.scale);
-        tab.show_new_tab_page = show_new_tab_page;
+        tab.set_opens_on_new_tab_page(show_new_tab_page);
         tab.servo
             .set_theme_preference(self.config.theme_preference.preference());
         self.tabs.insert().closable().text("New Tab").data(tab).id()
@@ -2242,7 +2242,7 @@ impl libcosmic::Application for App {
         };
 
         let (mut first_tab, servo_rx) = TabState::new(initial_url, initial_size, scale);
-        first_tab.show_new_tab_page = show_new_tab_page;
+        first_tab.set_opens_on_new_tab_page(show_new_tab_page);
         first_tab
             .servo
             .set_theme_preference(config.theme_preference.preference());
@@ -2518,6 +2518,7 @@ impl libcosmic::Application for App {
                         {
                             tab.url_bar_text = url.to_string();
                         }
+                        tab.sync_new_tab_page();
 
                         // A page may ask for a permission (geolocation, camera, …).
                         // Capture it with the requesting domain; the decision needs
