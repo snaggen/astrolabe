@@ -1,6 +1,6 @@
+use libcosmic::widget::image::Handle;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::Path;
 
 use libcosmic::iced::alignment::{Horizontal, Vertical};
 use libcosmic::iced::widget::Stack;
@@ -157,15 +157,15 @@ fn site_cell<'a>(
     let label = if title.trim().is_empty() { url } else { title }.to_string();
     let spacing = libcosmic::theme::spacing();
 
-    let thumbnail = tile.and_then(|t| t.thumbnail.as_deref());
-    let favicon = tile.and_then(|t| t.favicon.as_deref());
+    let thumbnail = tile.and_then(|t| t.thumbnail.as_ref());
+    let favicon = tile.and_then(|t| t.favicon.as_ref());
 
     // Layer the overlays over the base tile image.
     let mut tile_stack = Stack::new().push(tile_base(thumbnail, favicon, radius));
     // The favicon overlay only makes sense over a thumbnail; otherwise the
     // favicon is already the tile itself.
-    if let (Some(_), Some(path)) = (thumbnail, favicon) {
-        tile_stack = tile_stack.push(favicon_overlay(path));
+    if let (Some(_), Some(handle)) = (thumbnail, favicon) {
+        tile_stack = tile_stack.push(favicon_overlay(handle));
     }
     if hovered {
         tile_stack = tile_stack.push(pin_overlay(url, &label, pinned));
@@ -201,19 +201,19 @@ fn site_cell<'a>(
 /// Build the fixed-size base tile image: a rounded thumbnail, a centered favicon,
 /// or a generic site icon when neither is cached.
 fn tile_base<'a>(
-    thumbnail: Option<&Path>,
-    favicon: Option<&Path>,
+    thumbnail: Option<&Handle>,
+    favicon: Option<&Handle>,
     radius: [f32; 4],
 ) -> Element<'a, Message> {
     match (thumbnail, favicon) {
-        (Some(thumb), _) => widget::image(widget::image::Handle::from_path(thumb))
+        (Some(thumb), _) => widget::image(thumb.clone())
             .width(Length::Fixed(CELL_WIDTH))
             .height(Length::Fixed(THUMB_HEIGHT))
             .content_fit(ContentFit::Cover)
             .border_radius(radius)
             .into(),
-        (None, Some(path)) => tile_box(
-            widget::image(widget::image::Handle::from_path(path))
+        (None, Some(favicon)) => tile_box(
+            widget::image(favicon.clone())
                 .width(Length::Fixed(FAVICON_TILE))
                 .height(Length::Fixed(FAVICON_TILE))
                 .into(),
@@ -239,9 +239,9 @@ fn tile_box<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 }
 
 /// A favicon pinned to the top-right corner of the tile, to identify the site.
-fn favicon_overlay<'a>(path: &Path) -> Element<'a, Message> {
+fn favicon_overlay<'a>(favicon: &Handle) -> Element<'a, Message> {
     let radius = libcosmic::theme::active().cosmic().corner_radii.radius_xs;
-    let icon = widget::image(widget::image::Handle::from_path(path))
+    let icon = widget::image(favicon.clone())
         .width(Length::Fixed(FAVICON_OVERLAY))
         .height(Length::Fixed(FAVICON_OVERLAY))
         .border_radius(radius);

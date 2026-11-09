@@ -5,15 +5,17 @@
 //! site's `/favicon.ico`. Both are stored as PNG under the XDG cache directory
 //! and refreshed once they pass [`MAX_AGE`].
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use image::RgbaImage;
+use libcosmic::widget::image::Handle;
 
 /// Cached tile images refresh after this age (30 days).
 pub const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// Cached image paths for a single New Tab grid site.
+/// Cached images for a single New Tab grid site.
 ///
 /// A site can have a page thumbnail, a favicon, or both. The grid uses the
 /// thumbnail as the tile background and overlays the favicon to identify the
@@ -21,9 +23,41 @@ pub const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 #[derive(Clone, Default)]
 pub struct TileImage {
     /// Page thumbnail captured from the rendered page, if present on disk.
-    pub thumbnail: Option<PathBuf>,
+    pub thumbnail: Option<Handle>,
     /// Site favicon, if present on disk.
-    pub favicon: Option<PathBuf>,
+    pub favicon: Option<Handle>,
+}
+
+/// Image handles for the files on disk, renewed when a file changes.
+///
+/// The renderer caches an image by its handle's id, and a handle made from a
+/// path keeps the same id however often the file is rewritten, so a recaptured
+/// thumbnail would not show until restart. Handles here are made from the
+/// file's bytes and kept while its modification time stays the same.
+#[derive(Default)]
+pub struct TileImageCache {
+    entries: HashMap<PathBuf, (SystemTime, Handle)>,
+}
+
+impl TileImageCache {
+    /// Handle for the image at `path`, or `None` if it cannot be read.
+    pub fn load(&mut self, path: &Path) -> Option<Handle> {
+        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+        if let Some((cached, handle)) = self.entries.get(path)
+            && *cached == modified
+        {
+            return Some(handle.clone());
+        }
+        let handle = Handle::from_bytes(std::fs::read(path).ok()?);
+        self.entries
+            .insert(path.to_path_buf(), (modified, handle.clone()));
+        Some(handle)
+    }
+
+    /// Forget every image not in `paths`, so removed sites free their memory.
+    pub fn retain(&mut self, paths: &std::collections::HashSet<PathBuf>) {
+        self.entries.retain(|path, _| paths.contains(path));
+    }
 }
 
 impl TileImage {
@@ -146,6 +180,30 @@ fn ensure_parent(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tile_image_cache_renews_handle_when_file_changes() {
+        let path = std::env::temp_dir().join(format!("astrolabe-tile-{}.png", std::process::id()));
+        std::fs::write(&path, b"first").expect("write test file");
+        let mut cache = TileImageCache::default();
+
+        let first = cache.load(&path).expect("file is readable");
+        let again = cache.load(&path).expect("file is readable");
+        assert_eq!(first.id(), again.id());
+
+        std::fs::write(&path, b"second").expect("write test file");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open test file");
+        file.set_modified(SystemTime::now() + Duration::from_secs(10))
+            .expect("set modification time");
+        let renewed = cache.load(&path).expect("file is readable");
+        assert_ne!(first.id(), renewed.id());
+
+        std::fs::remove_file(&path).expect("remove test file");
+        assert!(cache.load(&path).is_none());
+    }
 
     #[test]
     fn thumbnail_path_is_deterministic_and_per_url() {

@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
 
 use crate::mpris::{MediaUpdate, PlaybackStatus};
 use astrolabe_webview::{
@@ -751,6 +750,8 @@ pub struct App {
     /// Cached thumbnail and favicon paths per grid URL. Rebuilt when the grid
     /// data changes or a thumbnail/favicon finishes writing.
     tile_images: HashMap<String, crate::thumbnails::TileImage>,
+    /// Image handles behind `tile_images`, renewed when a file is rewritten.
+    tile_image_cache: crate::thumbnails::TileImageCache,
     /// URL of the New Tab grid cell under the pointer, which reveals its pin
     /// button. `None` when no cell is hovered.
     hovered_tile: Option<String>,
@@ -1719,16 +1720,19 @@ impl App {
             .chain(self.top_sites.iter().map(|h| h.url.clone()));
 
         let mut images = HashMap::new();
+        let mut paths = HashSet::new();
         for url in urls {
-            let exists = |p: PathBuf| p.exists().then_some(p);
+            let (thumbnail, favicon) = (thumbnail_path(&url), favicon_path(&url));
             let tile = TileImage {
-                thumbnail: exists(thumbnail_path(&url)),
-                favicon: exists(favicon_path(&url)),
+                thumbnail: self.tile_image_cache.load(&thumbnail),
+                favicon: self.tile_image_cache.load(&favicon),
             };
+            paths.extend([thumbnail, favicon]);
             if !tile.is_empty() {
                 images.insert(url, tile);
             }
         }
+        self.tile_image_cache.retain(&paths);
         self.tile_images = images;
     }
 
@@ -2347,6 +2351,7 @@ impl libcosmic::Application for App {
             top_sites: Vec::new(),
             pinned_sites: Vec::new(),
             tile_images: HashMap::new(),
+            tile_image_cache: Default::default(),
             hovered_tile: None,
             url_bar_popover: None,
             filter_engines: None,
