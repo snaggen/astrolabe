@@ -51,6 +51,20 @@ const NEW_TAB_TOP_SITES: usize = 48;
 /// Firefox at 225 px.
 const TAB_MAX_WIDTH: f32 = 240.0;
 
+/// Stable id of the tab bar, see `header_center`.
+static TAB_BAR_ID: std::sync::LazyLock<widget::Id> =
+    std::sync::LazyLock::new(|| widget::Id::new("tab_bar"));
+
+/// MIME type of a tab dragged within the tab bar.
+const TAB_DRAG_MIME: &str = "application/x-astrolabe-tab";
+
+/// New position for a tab dragged from `from` to before (or `after`) the tab
+/// at `target`, as `position_set` expects it: counted without the dragged tab.
+fn reorder_position(from: u16, target: u16, after: bool) -> u16 {
+    let to = if after { target + 1 } else { target };
+    if from < to { to - 1 } else { to }
+}
+
 /// Widest the tab bar may be with `tabs` tabs, so no tab exceeds
 /// [`TAB_MAX_WIDTH`]. The tab bar has no spacing between tabs.
 fn tab_bar_max_width(tabs: usize) -> f32 {
@@ -394,6 +408,8 @@ pub enum Message {
     DevtoolsRespond(bool),
     /// User closed a tab.
     TabClosed(segmented_button::Entity),
+    /// User dragged a tab to a new place in the tab bar.
+    TabReorder(segmented_button::ReorderEvent),
     /// User requested a new tab.
     TabNew,
     /// Close the currently active tab (Ctrl+W).
@@ -3083,6 +3099,17 @@ impl libcosmic::Application for App {
                 self.sync_active_title();
             }
 
+            Message::TabReorder(event) => {
+                if let (Some(from), Some(target)) = (
+                    self.tabs.position(event.dragged),
+                    self.tabs.position(event.target),
+                ) {
+                    let after = event.position == segmented_button::InsertPosition::After;
+                    self.tabs
+                        .position_set(event.dragged, reorder_position(from, target, after));
+                }
+            }
+
             Message::TabNew => {
                 let (url, show_new_tab_page) = resolve_page(&self.config.new_tab_page);
                 let id = self.add_tab(url, show_new_tab_page);
@@ -4027,13 +4054,19 @@ impl libcosmic::Application for App {
         // ignored. Pick the bar's width from the space actually available instead.
         let tabs = widget::responsive(move |size| {
             let spacing = libcosmic::theme::spacing();
-            let tab_bar = widget::tab_bar::horizontal(&self.tabs)
+            let mut tab_bar = widget::tab_bar::horizontal(&self.tabs)
                 .show_close_icon_on_hover(true)
                 .on_activate(Message::TabActivated)
                 .on_close(Message::TabClosed)
+                .enable_tab_drag(TAB_DRAG_MIME.to_owned())
+                .on_reorder(Message::TabReorder)
                 // Gap between the favicon and the tab title (defaults to 0).
                 .button_spacing(spacing.space_xxs)
                 .width(Length::Fill);
+            // Dragging goes through the system's drag and drop, which finds the
+            // tab bar by its id. `responsive` rebuilds the bar on every layout, so
+            // a fresh id each time would lose the drag.
+            libcosmic::iced::advanced::Widget::set_id(&mut tab_bar, TAB_BAR_ID.clone());
             // The tab bar takes all the width it is offered whatever its own
             // `width`, so a container sets it.
             let tab_bar = widget::container(tab_bar).width(tab_bar_width(
@@ -4041,6 +4074,12 @@ impl libcosmic::Application for App {
                 self.tabs.len(),
                 new_tab_button_room(spacing),
             ));
+            // The tab bar sees a press but leaves it uncaptured, so the header
+            // would start moving the window on the first motion and the tab
+            // drag would never begin. A mouse area captures presses on the tabs
+            // after the tab bar has handled them; the header beside the tabs
+            // still moves the window.
+            let tab_bar = widget::mouse_area(tab_bar);
 
             let new_tab_btn = widget::button::icon(widget::icon::from_name("tab-new-symbolic"))
                 .on_press(Message::TabNew);
@@ -4282,6 +4321,16 @@ impl libcosmic::Application for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reorder_position_moves_tabs() {
+        // Tabs A B C at 0 1 2; position_set removes the tab before inserting.
+        assert_eq!(reorder_position(0, 2, true), 2); // A after C: B C A
+        assert_eq!(reorder_position(0, 2, false), 1); // A before C: B A C
+        assert_eq!(reorder_position(2, 0, false), 0); // C before A: C A B
+        assert_eq!(reorder_position(2, 0, true), 1); // C after A: A C B
+        assert_eq!(reorder_position(1, 1, true), 1); // onto itself: unchanged
+    }
 
     #[test]
     fn tab_bar_max_width_grows_per_tab() {
