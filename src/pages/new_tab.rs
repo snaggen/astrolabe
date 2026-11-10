@@ -10,6 +10,8 @@ use libcosmic::widget;
 
 use crate::app::Message;
 use crate::db::{BookmarkEntry, HistoryEntry};
+use crate::lift::Lift;
+use crate::pages::tile_lift::TileLift;
 use crate::thumbnails::TileImage;
 
 /// Fixed width of a single grid cell, in logical pixels.
@@ -22,13 +24,16 @@ const LABEL_HEIGHT: f32 = 34.0;
 const FAVICON_OVERLAY: f32 = 36.0;
 /// Size of a favicon shown as the whole tile (no thumbnail), in logical pixels.
 const FAVICON_TILE: f32 = 48.0;
+/// Scale of a fully lifted (hovered) cell.
+const LIFTED_SCALE: f32 = 1.06;
 
 /// New Tab page: a search box that focuses the URL bar and a grid of top sites.
 ///
 /// Pinned sites are shown first, then the most-visited history entries fill the
 /// remaining `columns * rows` cells. Cells already pinned are not repeated.
 /// `images` maps a URL to its cached tile images (thumbnail and/or favicon).
-/// `hovered` is the URL of the cell under the pointer, which reveals its pin button.
+/// `hovered` is the URL of the cell under the pointer, which reveals its pin button;
+/// `lift` animates that cell growing towards the pointer.
 pub fn view<'a>(
     top_sites: &'a [HistoryEntry],
     pinned: &'a [BookmarkEntry],
@@ -36,6 +41,7 @@ pub fn view<'a>(
     columns: u16,
     rows: u16,
     hovered: Option<&'a str>,
+    lift: &TileLift,
 ) -> Element<'a, Message> {
     // A gear button (top-left) opens the New Tab settings drawer.
     let settings_btn = widget::tooltip(
@@ -63,7 +69,7 @@ pub fn view<'a>(
     .on_press(Message::FocusUrlBar)
     .width(Length::Fixed(420.0));
 
-    let grid = grid_view(top_sites, pinned, images, columns, rows, hovered);
+    let grid = grid_view(top_sites, pinned, images, columns, rows, hovered, lift);
 
     // The window's translucent background is painted once, in `App::view`; this
     // page only adds content on top of it.
@@ -87,6 +93,7 @@ fn grid_view<'a>(
     columns: u16,
     rows: u16,
     hovered: Option<&'a str>,
+    lift: &TileLift,
 ) -> Element<'a, Message> {
     // Same rounding the theme uses for buttons, so tiles match the rest of the UI.
     let radius = libcosmic::theme::active().cosmic().corner_radii.radius_s;
@@ -106,6 +113,7 @@ fn grid_view<'a>(
             tile_of(&b.url),
             radius,
             is_hovered(&b.url),
+            lift.progress(&b.url),
         ));
     }
     for h in top_sites {
@@ -120,6 +128,7 @@ fn grid_view<'a>(
                 tile_of(&h.url),
                 radius,
                 is_hovered(&h.url),
+                lift.progress(&h.url),
             ));
         }
     }
@@ -146,6 +155,7 @@ fn grid_view<'a>(
 /// A single grid cell, laid out as a fixed-size card: a tile image (thumbnail,
 /// favicon, or generic icon) with a favicon overlay (top-right) and a pin/unpin
 /// button (top-left, revealed on hover), and a fixed-height title region below.
+/// `lift` (0.0–1.0) is how far the card has grown towards the pointer.
 fn site_cell<'a>(
     url: &str,
     title: &str,
@@ -153,6 +163,7 @@ fn site_cell<'a>(
     tile: Option<&TileImage>,
     radius: [f32; 4],
     hovered: bool,
+    lift: f32,
 ) -> Element<'a, Message> {
     let label = if title.trim().is_empty() { url } else { title }.to_string();
     let spacing = libcosmic::theme::spacing();
@@ -191,11 +202,31 @@ fn site_cell<'a>(
 
     // Hover/click cover the whole card. Clicking the pin button captures the
     // press, so navigation only fires when the rest of the card is clicked.
-    widget::mouse_area(card)
+    let card = widget::mouse_area(card)
         .on_press(Message::NavigateTo(url.to_string()))
         .on_enter(Message::TileHovered(url.to_string()))
-        .on_exit(Message::TileUnhovered)
-        .into()
+        .on_exit(Message::TileUnhovered(url.to_string()));
+
+    lifted(card, lift)
+}
+
+/// Scale `card` up by the lift `progress` (0.0–1.0) and give it a growing drop
+/// shadow, so it reads as raised towards the pointer.
+///
+/// While scaled, [`Lift`] draws the card on top
+/// of its neighbours and maps the pointer back into it, so hover and clicks keep
+/// working. The layout is untouched: the grid does not shift.
+fn lifted<'a>(card: impl Into<Element<'a, Message>>, progress: f32) -> Element<'a, Message> {
+    use libcosmic::iced::{Color, Shadow, Vector};
+
+    let scale = 1.0 + (LIFTED_SCALE - 1.0) * progress;
+    let shadow = Shadow {
+        color: Color::from_rgba(0.0, 0.0, 0.0, 0.25 * progress),
+        offset: Vector::new(0.0, 4.0 * progress),
+        blur_radius: 16.0 * progress,
+    };
+    let radius = libcosmic::theme::active().cosmic().corner_radii.radius_s;
+    Lift::new(card).scale(scale).shadow(shadow, radius).into()
 }
 
 /// Build the fixed-size base tile image: a rounded thumbnail, a centered favicon,

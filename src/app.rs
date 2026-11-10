@@ -443,8 +443,10 @@ pub enum Message {
     CaptureThumbnail(String),
     /// Pointer entered a New Tab grid cell; reveals its pin button.
     TileHovered(String),
-    /// Pointer left the hovered New Tab grid cell.
-    TileUnhovered,
+    /// Pointer left this New Tab grid cell.
+    TileUnhovered(String),
+    /// Display frame while a New Tab grid cell is lifting or settling.
+    TileLiftFrame(libcosmic::iced::time::Instant),
     // ── Settings ────────────────────────────────────────────────────────────────
     /// Open the settings tab (focusing the existing one if already open).
     SettingsOpen,
@@ -755,6 +757,8 @@ pub struct App {
     /// URL of the New Tab grid cell under the pointer, which reveals its pin
     /// button. `None` when no cell is hovered.
     hovered_tile: Option<String>,
+    /// Hover-lift animations of the New Tab grid cells.
+    tile_lift: pages::tile_lift::TileLift,
     // ── URL-bar indicators ────────────────────────────────────────────────────
     /// Which URL-bar indicator popover is open, if any.
     url_bar_popover: Option<UrlBarPopover>,
@@ -2353,6 +2357,7 @@ impl libcosmic::Application for App {
             tile_images: HashMap::new(),
             tile_image_cache: Default::default(),
             hovered_tile: None,
+            tile_lift: pages::tile_lift::TileLift::default(),
             url_bar_popover: None,
             filter_engines: None,
             custom_filter_list_url: String::new(),
@@ -2466,6 +2471,15 @@ impl libcosmic::Application for App {
         // Forward MPRIS media actions (from the applet or hardware keys) into the
         // app so the active tab's engine receives them.
         let mut subs = vec![spin_sub, window_sub, config_sub];
+
+        // Redraw at the display rate only while a New Tab cell is lifting or
+        // settling; an idle grid needs no frames.
+        if self
+            .tile_lift
+            .is_animating(libcosmic::iced::time::Instant::now())
+        {
+            subs.push(window::frames().map(|(_, now)| Message::TileLiftFrame(now)));
+        }
         if let Some(mpris) = &self.mpris {
             let sub = Subscription::run_with(MprisRx(mpris.action_rx.clone()), |s| {
                 s.0.clone().map(Message::MediaAction)
@@ -3230,8 +3244,21 @@ impl libcosmic::Application for App {
                 self.rebuild_tile_images();
             }
 
-            Message::TileHovered(url) => self.hovered_tile = Some(url),
-            Message::TileUnhovered => self.hovered_tile = None,
+            Message::TileHovered(url) => {
+                let now = libcosmic::iced::time::Instant::now();
+                self.tile_lift.lift(url.clone(), now);
+                self.hovered_tile = Some(url);
+            }
+            Message::TileUnhovered(url) => {
+                self.tile_lift
+                    .settle(&url, libcosmic::iced::time::Instant::now());
+                // Leaving one cell and entering the next can arrive in either
+                // order; only clear the hover if it is still this cell's.
+                if self.hovered_tile.as_deref() == Some(url.as_str()) {
+                    self.hovered_tile = None;
+                }
+            }
+            Message::TileLiftFrame(now) => self.tile_lift.tick(now),
 
             // ── Settings ──────────────────────────────────────────────────────
             Message::SettingsOpen => {
@@ -4291,6 +4318,7 @@ impl libcosmic::Application for App {
                 self.config.new_tab_columns,
                 self.config.new_tab_rows,
                 self.hovered_tile.as_deref(),
+                &self.tile_lift,
             ))
             .height(Length::Fill)
             .into()

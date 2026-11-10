@@ -8,6 +8,7 @@ mod experimental_features;
 mod filter_engine;
 mod filter_lists;
 mod frosted;
+mod lift;
 mod migrate;
 mod mpris;
 mod notifications;
