@@ -1,0 +1,19 @@
+[package]
+name = "astrolabe-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "EUPL-1.2"
+description = "MCP server that lets an AI assistant drive Astrolabe through its WebDriver port"
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+# Plain HTTP to 127.0.0.1 only, so no TLS backend.
+reqwest = { version = "0.13", default-features = false }
+rmcp = { version = "3.9", features = ["server", "transport-io", "macros", "schemars"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "io-util"] }

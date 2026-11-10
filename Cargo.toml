@@ -5,6 +5,9 @@ edition = "2024"
 rust-version = "1.93"
 license = "EUPL-1.2"
 
+[workspace]
+members = [".", "astrolabe-mcp"]
+
 [dependencies]
 cosmic-config = { git = "https://github.com/pop-os/libcosmic", rev = "c003a58fff660f5c55ebfb54a5908722fa7d1d6e" }
 astrolabe-webview = { git = "https://github.com/snaggen/astrolabe-webview", features = ["xdg-portal"] }
