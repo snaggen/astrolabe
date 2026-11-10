@@ -46,9 +46,10 @@ const ZOOM_MAX: f32 = 5.0;
 /// History rows fetched for the grid; trimmed to the visible cell count in `view`.
 const NEW_TAB_TOP_SITES: usize = 48;
 
-/// How long after a page reports itself loaded its New Tab thumbnail is taken,
-/// so the capture shows the page fully drawn.
-const THUMBNAIL_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+/// Longest wait for a page to finish rendering before its New Tab thumbnail
+/// is given up. A page that never settles (endless animation, or a tab hidden
+/// before it finished) would otherwise keep the request open for good.
+const THUMBNAIL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Widest a tab may grow, in logical pixels. Chrome caps tabs at 240 px;
 /// Firefox at 225 px.
@@ -439,8 +440,9 @@ pub enum Message {
     PinnedLoaded(Vec<BookmarkEntry>),
     /// A thumbnail or favicon finished writing; refresh the tile-image map.
     TileImagesChanged,
-    /// Time to capture the thumbnail of the active tab's page, if it still shows this URL.
-    CaptureThumbnail(String),
+    /// The engine finished rendering the page at this URL, with its screenshot
+    /// (`None` if the capture failed or timed out); save it as its thumbnail.
+    ThumbnailCaptured(String, Option<std::sync::Arc<image::RgbaImage>>),
     /// Pointer entered a New Tab grid cell; reveals its pin button.
     TileHovered(String),
     /// Pointer left this New Tab grid cell.
@@ -1744,10 +1746,9 @@ impl App {
     /// has finished loading. No-op until the page is complete, for non-HTTP(S)
     /// URLs, or when this URL was already scheduled.
     ///
-    /// A page reports itself complete before it is fully painted, so capturing
-    /// right away caught half-drawn pages. The capture waits
-    /// [`THUMBNAIL_DELAY`] instead; a static page draws no more frames, so
-    /// waiting for the next frame would never fire.
+    /// A page reports itself complete before it is fully painted, so the
+    /// screenshot is left to the engine, which takes it once images and fonts
+    /// are in and no frames are pending. Bounded by [`THUMBNAIL_TIMEOUT`].
     fn maybe_capture_active_thumbnail(&mut self) -> Task<Message> {
         use astrolabe_webview::LoadStatus;
 
@@ -1769,19 +1770,40 @@ impl App {
         }
         tab.thumb_captured_url = Some(url.clone());
 
-        Task::perform(tokio::time::sleep(THUMBNAIL_DELAY), move |()| {
-            libcosmic::action::app(Message::CaptureThumbnail(url.clone()))
-        })
+        let pending = tab.servo.take_screenshot();
+        Task::perform(
+            async move { tokio::time::timeout(THUMBNAIL_TIMEOUT, pending).await },
+            move |result| {
+                let image = match result {
+                    Ok(Ok(image)) => Some(std::sync::Arc::new(image)),
+                    Ok(Err(e)) => {
+                        tracing::debug!("Thumbnail capture failed: {e:?}");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!("Thumbnail capture timed out for {url}");
+                        None
+                    }
+                };
+                libcosmic::action::app(Message::ThumbnailCaptured(url.clone(), image))
+            },
+        )
     }
 
-    /// Capture a thumbnail and fetch a favicon for `url`, if the active tab
-    /// still shows it fully loaded.
-    fn capture_active_thumbnail(&mut self, url: String) -> Task<Message> {
+    /// Save the captured thumbnail and fetch a favicon for `url`, if the active
+    /// tab still shows it fully loaded.
+    fn save_captured_thumbnail(
+        &mut self,
+        url: String,
+        image: Option<std::sync::Arc<image::RgbaImage>>,
+    ) -> Task<Message> {
         use astrolabe_webview::LoadStatus;
 
         let Some(tab) = self.tabs.active_data::<TabState>() else {
             return Task::none();
         };
+        // The capture waits for the page to settle; a tab that navigated away
+        // meanwhile may have handed back a different page.
         let still_showing = tab.servo.current_url().map(|u| u.to_string()) == Some(url.clone());
         if !still_showing || tab.servo.load_status() != LoadStatus::Complete {
             return Task::none();
@@ -1789,9 +1811,8 @@ impl App {
 
         let mut tasks = Vec::new();
 
-        // The GPU readback must run on this thread; the downscale + encode are
-        // offloaded to the executor.
-        if let Some(frame) = tab.servo.screenshot() {
+        // The downscale + encode are offloaded to the executor.
+        if let Some(frame) = image {
             let url = url.clone();
             tasks.push(Task::perform(
                 async move { crate::thumbnails::save_thumbnail(&url, &frame) },
@@ -3238,7 +3259,9 @@ impl libcosmic::Application for App {
                 return self.fetch_missing_favicons();
             }
 
-            Message::CaptureThumbnail(url) => return self.capture_active_thumbnail(url),
+            Message::ThumbnailCaptured(url, image) => {
+                return self.save_captured_thumbnail(url, image);
+            }
 
             Message::TileImagesChanged => {
                 self.rebuild_tile_images();
