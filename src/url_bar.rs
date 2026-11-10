@@ -501,6 +501,28 @@ pub fn devtools_prompt<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// A prompt shown when a WebDriver client, such as the `astrolabe-mcp` server,
+/// wants to start controlling the browser. The server listens on every network
+/// interface, so the client may be on another computer.
+#[cfg(feature = "webdriver")]
+pub fn webdriver_prompt<'a>() -> Element<'a, Message> {
+    let text = "An automation client (WebDriver) wants to control this browser. \
+                It may be connecting from another computer. If you deny it, no new \
+                connections are accepted until the browser restarts.";
+    let row = widget::row::with_capacity(3)
+        .align_y(Alignment::Center)
+        .spacing(8)
+        .push(widget::text(text).width(Length::Fill))
+        .push(widget::button::standard("Deny").on_press(Message::WebDriverRespond(false)))
+        .push(widget::button::suggested("Allow").on_press(Message::WebDriverRespond(true)));
+
+    widget::container(row)
+        .padding(8)
+        .width(Length::Fill)
+        .class(libcosmic::theme::Container::Primary)
+        .into()
+}
+
 /// The zoom indicator: a percentage label shown only when zoom differs from
 /// 100 %. Clicking it opens a popover with zoom controls.
 fn zoom_indicator<'a>(zoom: f32, open: Option<UrlBarPopover>) -> Option<Element<'a, Message>> {

@@ -391,6 +391,12 @@ pub struct BrowserConfig {
     pub devtools_enabled: bool,
     /// TCP port the devtools server listens on. Default: 6080.
     pub devtools_port: u16,
+    /// Start the WebDriver server, which automation tools such as the
+    /// `astrolabe-mcp` server drive the browser through. Only builds with the
+    /// `webdriver` feature act on it. Takes effect on the next startup.
+    pub webdriver_enabled: bool,
+    /// TCP port the WebDriver server listens on. Default: 7000.
+    pub webdriver_port: u16,
     /// Default serif font for web content; empty uses the engine default.
     pub web_font_serif: String,
     /// Default sans-serif font for web content; empty uses the engine default.
@@ -429,6 +435,8 @@ impl Default for BrowserConfig {
             allow_camera_microphone: false,
             devtools_enabled: false,
             devtools_port: 6080,
+            webdriver_enabled: false,
+            webdriver_port: 7000,
             web_font_serif: String::new(),
             web_font_sans_serif: String::new(),
             web_font_monospace: String::new(),

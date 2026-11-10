@@ -677,6 +677,15 @@ pub enum Message {
     SetDevToolsEnabled(bool),
     /// Update the devtools server port (settings text field). Takes effect on restart.
     SetDevToolsPort(String),
+    /// Enable or disable the WebDriver server (settings toggle). Takes effect on restart.
+    #[cfg(feature = "webdriver")]
+    SetWebDriverEnabled(bool),
+    /// Update the WebDriver server port (settings text field). Takes effect on restart.
+    #[cfg(feature = "webdriver")]
+    SetWebDriverPort(String),
+    /// The user allowed (`true`) or denied (`false`) a new WebDriver session.
+    #[cfg(feature = "webdriver")]
+    WebDriverRespond(bool),
     /// Close the info dialog.
     InfoDialogClose,
 }
@@ -697,7 +706,7 @@ pub struct App {
     #[cfg(feature = "gamepad")]
     gamepad_connected: bool,
     /// WebDriver server and the navigations clients are waiting on; `None`
-    /// unless `--webdriver-port` was given.
+    /// unless enabled in settings or by `--webdriver-port`.
     #[cfg(feature = "webdriver")]
     webdriver: Option<crate::webdriver::WebDriver>,
     /// (active tab, its media generation) last published to MPRIS, so we only
@@ -806,6 +815,9 @@ pub struct App {
     info_dialog_message: Option<String>,
     /// Text-field mirror of `config.devtools_port` for the settings UI.
     devtools_port_str: String,
+    /// Text-field mirror of `config.webdriver_port` for the settings UI.
+    #[cfg(feature = "webdriver")]
+    webdriver_port_str: String,
 }
 
 /// Maps a key press to a browser action, implementing Firefox-compatible
@@ -997,12 +1009,14 @@ impl App {
                 let ids = self.webview_ids();
                 reply("GetAllWebViews", sender.send(ids));
             }
+            // Servo asks this only when a session starts. The client waits
+            // until the user allows it; see `Message::WebDriverRespond`.
             Msg::GetWebViewSelectedForInteraction(sender) => {
-                let id = self
-                    .tabs
-                    .active_data::<TabState>()
-                    .map(|tab| tab.servo.webview_id());
-                reply("GetWebViewSelectedForInteraction", sender.send(id));
+                if let Some(driver) = &mut self.webdriver {
+                    driver.sessions().hold(move |id| {
+                        reply("GetWebViewSelectedForInteraction", sender.send(id));
+                    });
+                }
             }
             Msg::IsWebViewOpen(webview, sender) => {
                 let open = self.tab_for_webview(webview).is_some();
@@ -1191,6 +1205,28 @@ impl App {
     }
 
     /// Answers finished navigations and runs pending WebDriver commands.
+    /// Let the waiting WebDriver session drive the active tab, or fail it.
+    #[cfg(feature = "webdriver")]
+    fn answer_webdriver_session(&mut self, allow: bool) -> Task<Message> {
+        let active = self
+            .tabs
+            .active_data::<TabState>()
+            .map(|tab| tab.servo.webview_id());
+        let Some(driver) = &mut self.webdriver else {
+            return Task::none();
+        };
+        if allow {
+            driver.sessions().allow(active);
+            return Task::none();
+        }
+        driver.sessions().deny();
+        self.toasts
+            .push(widget::Toast::new(
+                "WebDriver connection denied. Restart the browser to accept new connections.",
+            ))
+            .map(libcosmic::action::app)
+    }
+
     #[cfg(feature = "webdriver")]
     fn pump_webdriver(&mut self) {
         if self.webdriver.is_none() {
@@ -2341,6 +2377,8 @@ impl libcosmic::Application for App {
         }
 
         let devtools_port_str = config.devtools_port.to_string();
+        #[cfg(feature = "webdriver")]
+        let webdriver_port_str = config.webdriver_port.to_string();
 
         let app = App {
             core,
@@ -2396,14 +2434,22 @@ impl libcosmic::Application for App {
             session_permissions: HashMap::new(),
             info_dialog_message: None,
             devtools_port_str,
+            #[cfg(feature = "webdriver")]
+            webdriver_port_str,
         };
 
         // The first tab started the engine, whose waker and preferences the
         // WebDriver server borrows, so it can only start from here.
         #[cfg(feature = "webdriver")]
         let mut app = app;
+        // `--webdriver-port` turns it on for this session whatever the setting
+        // says, without changing the stored configuration.
         #[cfg(feature = "webdriver")]
-        if let Some(port) = cli.webdriver_port {
+        if let Some(port) = cli.webdriver_port.or(app
+            .config
+            .webdriver_enabled
+            .then_some(app.config.webdriver_port))
+        {
             app.webdriver = crate::webdriver::WebDriver::start(port);
         }
 
@@ -4096,6 +4142,22 @@ impl libcosmic::Application for App {
                     self.write_config(|c, h| c.set_devtools_port(h, port));
                 }
             }
+
+            #[cfg(feature = "webdriver")]
+            Message::SetWebDriverEnabled(on) => {
+                self.write_config(|c, h| c.set_webdriver_enabled(h, on));
+            }
+
+            #[cfg(feature = "webdriver")]
+            Message::SetWebDriverPort(s) => {
+                self.webdriver_port_str = s.clone();
+                if let Ok(port) = s.parse::<u16>() {
+                    self.write_config(|c, h| c.set_webdriver_port(h, port));
+                }
+            }
+
+            #[cfg(feature = "webdriver")]
+            Message::WebDriverRespond(allow) => return self.answer_webdriver_session(allow),
         }
 
         Task::none()
@@ -4271,7 +4333,11 @@ impl libcosmic::Application for App {
                     grants: &self.permission_grants,
                     allow_camera_microphone: self.config.allow_camera_microphone,
                 },
-                &self.devtools_port_str,
+                pages::settings::Developer {
+                    devtools_port: &self.devtools_port_str,
+                    #[cfg(feature = "webdriver")]
+                    webdriver_port: &self.webdriver_port_str,
+                },
                 &self.user_scripts,
             ))
             .height(Length::Fill);
@@ -4396,6 +4462,14 @@ impl libcosmic::Application for App {
         // Show a remote-devtools connection prompt (engine-level, any tab).
         if self.pending_devtools.is_some() {
             root = root.push(url_bar::devtools_prompt());
+        }
+        #[cfg(feature = "webdriver")]
+        if self
+            .webdriver
+            .as_ref()
+            .is_some_and(crate::webdriver::WebDriver::awaits_approval)
+        {
+            root = root.push(url_bar::webdriver_prompt());
         }
         // Show the find bar just above the content area when active.
         if let Some(find_state) = &tab.find_bar {

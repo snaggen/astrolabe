@@ -36,6 +36,15 @@ pub struct DataClearing<'a> {
     pub site_filter: &'a str,
 }
 
+/// Text-field contents of the "Developer Tools" settings section.
+pub struct Developer<'a> {
+    /// The DevTools port as typed.
+    pub devtools_port: &'a str,
+    /// The WebDriver port as typed.
+    #[cfg(feature = "webdriver")]
+    pub webdriver_port: &'a str,
+}
+
 /// State for the "Site permissions" settings section.
 pub struct Permissions<'a> {
     /// Global default response per configurable permission category.
@@ -165,7 +174,7 @@ pub fn view<'a>(
     filter_list_url: &'a str,
     clearing: DataClearing<'a>,
     permissions: Permissions<'a>,
-    devtools_port_str: &'a str,
+    developer: Developer<'a>,
     user_scripts: &'a [crate::user_content::ScriptEntry],
 ) -> Element<'a, Message> {
     let spacing = libcosmic::theme::spacing();
@@ -192,7 +201,7 @@ pub fn view<'a>(
         SettingsSection::Appearance => appearance_section(config),
         SettingsSection::ClearData => data_clearing_section(clearing),
         SettingsSection::UserContent => user_content_section(config, user_scripts),
-        SettingsSection::Developer => developer_section(config, devtools_port_str),
+        SettingsSection::Developer => developer_section(config, developer),
         SettingsSection::Experimental => experimental_section(config),
     };
     let scroll = widget::scrollable(
@@ -701,7 +710,7 @@ fn user_content_section<'a>(
     widget::settings::view_column(vec![script_list.into(), stylesheet.into()]).into()
 }
 
-fn developer_section<'a>(config: &'a BrowserConfig, port_str: &'a str) -> Element<'a, Message> {
+fn developer_section<'a>(config: &'a BrowserConfig, fields: Developer<'a>) -> Element<'a, Message> {
     let enable_row = widget::row::with_capacity(2)
         .push(widget::text("Enable remote DevTools server").width(Length::Fill))
         .push(widget::toggler(config.devtools_enabled).on_toggle(Message::SetDevToolsEnabled))
@@ -710,25 +719,57 @@ fn developer_section<'a>(config: &'a BrowserConfig, port_str: &'a str) -> Elemen
     let port_row = widget::row::with_capacity(2)
         .push(widget::text("DevTools port").width(Length::Fill))
         .push(
-            widget::text_input("6080", port_str)
+            widget::text_input("6080", fields.devtools_port)
                 .on_input(Message::SetDevToolsPort)
                 .width(Length::Fixed(80.0)),
         )
         .align_y(Alignment::Center);
 
-    widget::settings::view_column(vec![
-        widget::settings::section()
-            .title("Developer Tools")
-            .add(enable_row)
-            .add(port_row)
-            .add(widget::text::caption(
-                "Implements the Firefox Remote Debugging Protocol. \
-                 Connect from Firefox DevTools → Remote Debugging → localhost:PORT. \
-                 Changes take effect on the next startup.",
-            ))
-            .into(),
-    ])
-    .into()
+    let devtools = widget::settings::section()
+        .title("Developer Tools")
+        .add(enable_row)
+        .add(port_row)
+        .add(widget::text::caption(
+            "Implements the Firefox Remote Debugging Protocol. \
+             Connect from Firefox DevTools → Remote Debugging → localhost:PORT. \
+             Changes take effect on the next startup.",
+        ));
+
+    #[cfg_attr(not(feature = "webdriver"), allow(unused_mut))]
+    let mut sections = vec![devtools.into()];
+    #[cfg(feature = "webdriver")]
+    sections.push(automation_section(config, fields.webdriver_port));
+    widget::settings::view_column(sections).into()
+}
+
+/// The WebDriver server, which automation tools such as the `astrolabe-mcp`
+/// server drive the browser through.
+#[cfg(feature = "webdriver")]
+fn automation_section<'a>(config: &'a BrowserConfig, port_str: &'a str) -> Element<'a, Message> {
+    let enable_row = widget::row::with_capacity(2)
+        .push(widget::text("Enable WebDriver automation (MCP)").width(Length::Fill))
+        .push(widget::toggler(config.webdriver_enabled).on_toggle(Message::SetWebDriverEnabled))
+        .align_y(Alignment::Center);
+
+    let port_row = widget::row::with_capacity(2)
+        .push(widget::text("WebDriver port").width(Length::Fill))
+        .push(
+            widget::text_input("7000", port_str)
+                .on_input(Message::SetWebDriverPort)
+                .width(Length::Fixed(80.0)),
+        )
+        .align_y(Alignment::Center);
+
+    widget::settings::section()
+        .title("Automation")
+        .add(enable_row)
+        .add(port_row)
+        .add(widget::text::caption(
+            "Lets tools such as the astrolabe-mcp server control the browser. \
+             The server listens on all network interfaces; every new connection \
+             must be allowed in the browser. Changes take effect on the next startup.",
+        ))
+        .into()
 }
 
 /// The "Experimental" section: an introduction with a reset control, then one

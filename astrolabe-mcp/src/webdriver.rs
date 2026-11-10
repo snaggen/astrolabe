@@ -174,7 +174,10 @@ impl WebDriver {
             return Ok(id.clone());
         }
         let body = json!({ "capabilities": { "alwaysMatch": {} } });
-        let value = self.request(Method::POST, "/session", Some(body)).await?;
+        let value = self
+            .request(Method::POST, "/session", Some(body))
+            .await
+            .map_err(explain_new_session_error)?;
         let id = session_id_from(&value)?;
         *session = Some(id.clone());
         Ok(id)
@@ -231,6 +234,26 @@ fn session_id_from(value: &Value) -> Result<String> {
     }
 }
 
+/// Rewrite the errors Astrolabe gives a refused session into what happened.
+///
+/// Astrolabe asks the user to allow every new session. A denied one fails as
+/// "no such window", and Servo then keeps that session, so every later attempt
+/// fails as "session not created" until the browser restarts.
+fn explain_new_session_error(error: Error) -> Error {
+    let Error::WebDriver { error, message } = error else {
+        return error;
+    };
+    let message = match error.as_str() {
+        "no such window" => "the connection was denied in Astrolabe".to_owned(),
+        "session not created" => format!(
+            "{message} — another client is connected, or a connection was denied; \
+             restart Astrolabe to accept new connections"
+        ),
+        _ => message,
+    };
+    Error::WebDriver { error, message }
+}
+
 fn as_string(value: Value) -> Result<String> {
     match value {
         Value::String(s) => Ok(s),
@@ -270,6 +293,26 @@ mod tests {
             parse_response(b"not json"),
             Err(Error::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn a_denied_session_is_explained() {
+        let denied = Error::WebDriver {
+            error: "no such window".to_owned(),
+            message: String::new(),
+        };
+        let text = explain_new_session_error(denied).to_string();
+        assert!(text.contains("denied in Astrolabe"), "{text}");
+    }
+
+    #[test]
+    fn a_blocked_session_suggests_a_restart() {
+        let blocked = Error::WebDriver {
+            error: "session not created".to_owned(),
+            message: "Session already created".to_owned(),
+        };
+        let text = explain_new_session_error(blocked).to_string();
+        assert!(text.contains("restart Astrolabe"), "{text}");
     }
 
     #[test]
